@@ -32,7 +32,10 @@ CREATE TABLE IF NOT EXISTS videos(
 CREATE TABLE IF NOT EXISTS clips(
     id TEXT PRIMARY KEY, video_id TEXT, start_sec REAL, end_sec REAL, hook_text TEXT, title TEXT,
     reason TEXT, score REAL, status TEXT, file_path TEXT, created_at TEXT,
-    layout TEXT DEFAULT 'crop', attempts INTEGER DEFAULT 0);
+    layout TEXT DEFAULT 'crop', attempts INTEGER DEFAULT 0,
+    telegram_message_id INTEGER, links_prompt_id INTEGER, delivered_at TEXT, done_at TEXT,
+    message_deleted INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS posts(
     id INTEGER PRIMARY KEY, clip_id TEXT, platform TEXT, url TEXT, posted_at TEXT, views INT,
     views_checked_at TEXT, submitted_to_campaign INT, campaign_status TEXT, earnings REAL);
@@ -51,7 +54,19 @@ MIGRATIONS = (
     ("videos", "attempts", "INTEGER DEFAULT 0"),
     ("videos", "failed_status", "TEXT"),
     ("videos", "upload_date", "TEXT"),
+    ("clips", "telegram_message_id", "INTEGER"),
+    ("clips", "links_prompt_id", "INTEGER"),
+    ("clips", "delivered_at", "TEXT"),
+    ("clips", "done_at", "TEXT"),
+    ("clips", "message_deleted", "INTEGER DEFAULT 0"),
 )
+
+# Clip statuses: picked -> rendered -> delivered (sent to Telegram) -> posted | rejected.
+# `rerender` = asked for again (e.g. Fit layout); failed as for videos.
+CLIP_COLUMNS = frozenset(
+    {"status", "layout", "file_path", "telegram_message_id", "links_prompt_id",
+     "delivered_at", "done_at", "message_deleted"}
+)  # fmt: skip
 
 
 def now() -> str:
@@ -67,7 +82,8 @@ def next_status(status: str) -> str:
 
 def connect(data_dir: Path) -> sqlite3.Connection:
     data_dir.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(data_dir / "clipper.db", isolation_level=None)  # autocommit
+    # autocommit; wait for the lock when the Telegram bot and a run write at the same time
+    conn = sqlite3.connect(data_dir / "clipper.db", isolation_level=None, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     for table, column, definition in MIGRATIONS:
@@ -258,4 +274,63 @@ def fail_clip(conn: sqlite3.Connection, clip_id: str) -> None:
     conn.execute(
         "UPDATE clips SET status = ?, attempts = COALESCE(attempts, 0) + 1 WHERE id = ?",
         (FAILED, clip_id),
+    )
+
+
+def get_clip(conn: sqlite3.Connection, clip_id: str) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM clips WHERE id = ?", (clip_id,)).fetchone()
+
+
+def clips_in(conn: sqlite3.Connection, status: str, limit: int | None = None) -> list[sqlite3.Row]:
+    """Clips in `status`, oldest first."""
+    sql = "SELECT * FROM clips WHERE status = ? ORDER BY created_at, id"
+    params: tuple = (status,)
+    if limit is not None:
+        sql += " LIMIT ?"
+        params += (limit,)
+    return conn.execute(sql, params).fetchall()
+
+
+def update_clip(conn: sqlite3.Connection, clip_id: str, **fields: object) -> None:
+    unknown = set(fields) - CLIP_COLUMNS
+    if unknown:
+        raise ValueError(f"not clip columns: {sorted(unknown)}")
+    sets = ", ".join(f"{name} = ?" for name in fields)
+    conn.execute(f"UPDATE clips SET {sets} WHERE id = ?", (*fields.values(), clip_id))
+
+
+def clip_for_message(conn: sqlite3.Connection, message_id: int) -> sqlite3.Row | None:
+    """The clip whose Telegram video message, or links prompt, has this id."""
+    return conn.execute(
+        "SELECT * FROM clips WHERE telegram_message_id = ? OR links_prompt_id = ?",
+        (message_id, message_id),
+    ).fetchone()
+
+
+def add_post(conn: sqlite3.Connection, clip_id: str, platform: str, url: str) -> bool:
+    """Record where a clip was posted. Returns False if this URL was already known."""
+    if conn.execute("SELECT 1 FROM posts WHERE clip_id = ? AND url = ?", (clip_id, url)).fetchone():
+        return False
+    conn.execute(
+        "INSERT INTO posts(clip_id, platform, url, posted_at, submitted_to_campaign)"
+        " VALUES (?, ?, ?, ?, 0)",
+        (clip_id, platform, url, now()),
+    )
+    return True
+
+
+def posts_for(conn: sqlite3.Connection, clip_id: str) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM posts WHERE clip_id = ? ORDER BY id", (clip_id,)).fetchall()
+
+
+def get_setting(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO settings(key, value) VALUES (?, ?)"
+        " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
     )

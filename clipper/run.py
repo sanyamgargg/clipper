@@ -29,6 +29,8 @@ from clipper.stages.fetch import VideoMeta, fetch_audio, fetch_segment, probe
 from clipper.stages.pick import Clip, load_clips, pick, save_clips
 from clipper.stages.render import render_clip
 from clipper.stages.transcribe import transcribe
+from clipper.telegram.api import TelegramError
+from clipper.telegram.inbox import Inbox, deliver, open_inbox, poll
 from clipper.timing import Word, load_words
 
 log = logging.getLogger("clipper.run")
@@ -206,11 +208,19 @@ def run_pipeline(cfg: Config, conn: sqlite3.Connection, discover_new: bool = Tru
         with db.stage_run(conn, "discover", "-"):
             discover(cfg, conn)
 
+    inbox = open_inbox(cfg, conn)
+    if inbox:
+        _poll_once(inbox)  # apply buttons pressed while the bot was not running
+
     failures = stage_audio(cfg, conn)
     failures += stage_transcribe(cfg, conn)
     pick_failures, claude_ok = stage_pick(cfg, conn)
     failures += pick_failures + stage_render(cfg, conn)
+    failures += stage_rerender(cfg, conn)
     stage_cleanup(cfg, conn)
+    if inbox:
+        with db.stage_run(conn, "deliver", "-"):
+            failures += deliver(inbox, cfg.telegram.max_per_run)[1]
 
     if not claude_ok:
         return EXIT_CLAUDE
@@ -225,6 +235,41 @@ def add_url(cfg: Config, conn: sqlite3.Connection, campaign_id: str | None, url:
     if not added:
         row = db.get_video(conn, meta.id)
         log.info("%s is already known (status %s)", meta.id, row["status"] if row else "?")
+
+
+def _poll_once(inbox: Inbox) -> None:
+    try:
+        n = poll(inbox, 0)
+        if n:
+            log.info("telegram: handled %d update(s)", n)
+    except TelegramError as exc:
+        if exc.code == 409:
+            log.info("telegram: the bot process is polling; skipped")
+        else:
+            log.warning("telegram poll failed: %s", exc)
+
+
+def stage_rerender(cfg: Config, conn: sqlite3.Connection) -> int:
+    """Clips asked for again (Telegram layout button), and retries of such clips whose
+    video is already done. They go back to `rendered`, so deliver sends them again."""
+    rows = conn.execute(
+        "SELECT c.id FROM clips c JOIN videos v ON v.id = c.video_id WHERE c.status = 'rerender'"
+        " OR (c.status = 'picked' AND v.status = 'done') ORDER BY c.created_at, c.id"
+    ).fetchall()
+    failures = 0
+    for row in rows:
+        failures += rerender(cfg, conn, row["id"], None) != EXIT_OK
+    return failures
+
+
+def rerender_all(cfg: Config, conn: sqlite3.Connection) -> int:
+    """Render every rendered or delivered clip again with the current styling."""
+    ids = [r["id"] for status in ("rendered", "delivered") for r in db.clips_in(conn, status)]
+    log.info("re-rendering %d clip(s)", len(ids))
+    failed = [cid for cid in ids if rerender(cfg, conn, cid, None) != EXIT_OK]
+    if failed:
+        log.error("failed: %s", ", ".join(failed))
+    return EXIT_FAILURES if failed else EXIT_OK
 
 
 def rerender(cfg: Config, conn: sqlite3.Connection, clip_id: str, layout: str | None) -> int:
@@ -262,6 +307,9 @@ def main(argv: list[str] | None = None) -> int:
     what = parser.add_mutually_exclusive_group()
     what.add_argument("--url", help="add this video (from a joined campaign), then run")
     what.add_argument("--rerender", metavar="CLIP_ID", help="render one picked clip again")
+    what.add_argument(
+        "--rerender-all", action="store_true", help="render all rendered/delivered clips again"
+    )
     parser.add_argument("--layout", choices=["crop", "fit"], help="with --rerender: new layout")
     parser.add_argument("--campaign", help="with --url: campaign id (default: first active)")
     parser.add_argument("--config", type=Path, help="path to config.yaml")
@@ -282,6 +330,8 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 if args.rerender:
                     return rerender(cfg, conn, args.rerender, args.layout)
+                if args.rerender_all:
+                    return rerender_all(cfg, conn)
                 if args.url:
                     add_url(cfg, conn, args.campaign, args.url)
                 return run_pipeline(cfg, conn, discover_new=not args.url)

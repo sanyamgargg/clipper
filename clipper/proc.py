@@ -89,14 +89,14 @@ def run(
 
 
 @contextmanager
-def run_lock(data_dir: Path) -> Iterator[None]:
-    """Hold data/clipper.lock for the duration of a run. Raises AlreadyRunning if another
-    live run holds it. A lock left by a dead run is taken over, after killing the child
-    process that run may have left behind."""
+def run_lock(data_dir: Path, name: str = LOCK_NAME) -> Iterator[None]:
+    """Hold data/<name> (default clipper.lock) while running. Raises AlreadyRunning if
+    another live process holds it. A lock left by a dead process is taken over, after
+    killing the child process it may have left behind."""
     global _child_file
     data_dir.mkdir(parents=True, exist_ok=True)
-    lock = data_dir / LOCK_NAME
-    child = data_dir / (LOCK_NAME + ".child")
+    lock = data_dir / name
+    child = data_dir / (name + ".child")
     for _ in range(2):
         try:
             fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)

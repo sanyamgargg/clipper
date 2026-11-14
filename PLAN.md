@@ -204,7 +204,7 @@ llm_calls(id INTEGER PK, video_id, model, input_tokens, output_tokens, cost_usd,
 | M0 | Setup | `scripts/setup.sh` installs ffmpeg, yt-dlp, whisper.cpp model, venv; `claude -p "hi"` works with subscription login |
 | M1 | One video end-to-end (CLI) | `python -m clipper.run --url <video>` produces 3–5 good clips in `data/clips/` |
 | M2 | Batch + DB + resumable | Pipeline processes 2 videos from config, survives a kill mid-run |
-| M3 | Clip inbox (cloud) | Rendered clips appear on the private Cloudflare page; copy caption, download, Done deletes from R2 (see §14) |
+| M3 | Clip inbox (Telegram) | Rendered clips arrive in a private Telegram chat with tap-to-copy caption; Done/Reject/links recorded (see §14) |
 | M4 | Nightly schedule | launchd runs it unattended for 3 nights in a row |
 | M5 | Metrics | Posted URLs + views + campaign status tracked; weekly summary command |
 | M6 | API publishing | YouTube + Instagram auto-post after approvals land |
@@ -244,64 +244,63 @@ Full rules: https://reachclipping.com/TJR (also stored in `config.yaml` → `cam
 - **Sources:** YouTube @TJRTrades (videos + streams) and @TRichesTrades. Streams are long: transcribe only, then
   download/cut just the needed segments if disk is tight.
 
-## 14. Clip inbox (replaces the local review UI in §6.5)
+## 14. Clip inbox via Telegram bot (replaces the local review UI in §6.5; no cloud storage)
 
-Goal: open a private page from anywhere (phone or laptop, Mac can be off), see new clips, copy caption, download video,
-post manually, submit the link to the campaign, press **Done** and the files are deleted from the cloud.
+Goal: every rendered clip lands in a private Telegram chat on Sanyam's phone with the video, a tap-to-copy caption,
+the campaign submit link and Done / Reject buttons. Free, no card, no website. Telegram stores the files, so saving a
+video and copying a caption work even when the Mac is off; buttons and replies are processed when the bot runs.
 
-### Components
-- **Storage:** Cloudflare R2 bucket `clipper-inbox` (S3-compatible, 10 GB free, no egress fees). Not public.
-- **Page + API:** one Cloudflare Worker (TypeScript) with the R2 bucket bound, serving a small single page (plain HTML/JS
-  or tiny React build) and a JSON API. Deployed with `wrangler`.
-- **Auth:** Cloudflare Access (Zero Trust, free) in front of the Worker: allow only Sanyam's email, one-time PIN login.
-  The Mac uploads with R2 S3 API keys, never through the Worker.
-- **Metadata:** stored in R2 next to each clip, no extra database.
+### Setup (Sanyam, one-time)
+1. In Telegram, message @BotFather → `/newbot` → copy the bot token.
+2. Store the token in the macOS Keychain: `security add-generic-password -s clipper-telegram -a bot -w <token>`.
+3. Send `/start` to the new bot, then run `python -m clipper.telegram link` once: it reads the update, stores the
+   chat id in config, and from then on the bot ignores every other chat.
 
-### R2 layout
-```
-inbox/<clip_id>.mp4
-inbox/<clip_id>.jpg
-inbox/<clip_id>.json   # id, campaign_id, campaign_submit_url, title, caption (with required hashtags),
-                       # hook_text, duration_sec, score, created_at
-done/<clip_id>.json    # same metadata + posted_urls {youtube_shorts, instagram_reels}, done_at
-```
+### Library
+`python-telegram-bot` (async) or plain HTTPS calls to the Bot API with `httpx`; prefer the smaller dependency.
+Long polling only (no webhooks, no public server).
 
-### Mac side (pipeline stage `upload`, runs after `render`)
-- boto3 against the R2 endpoint; creds from macOS Keychain or a gitignored `.env` (never committed).
-- Upload mp4, jpg, json; set clip status `uploaded`. Local mp4 may be deleted after a successful upload
-  (config `delete_local_after_upload: true`) to save disk.
-- `sync_done` step at the start of every run: list `done/`, write posted URLs + done_at into SQLite `posts`,
-  set clip status `posted`, then delete the `done/` object.
+### Pipeline stage `deliver` (after `render`)
+For each rendered clip not yet delivered, oldest first, max `telegram.max_per_run` per run:
+- `sendVideo` with `supports_streaming=true`, the jpg as thumbnail, width/height/duration set.
+- Message text (HTML parse mode):
+  - bold title, campaign name, score, duration
+  - the caption inside `<code>…</code>` so one tap copies it (includes required hashtags like `#TJR`)
+  - "Submit within 30 min of posting:" + campaign `submit_url`
+- Inline keyboard: `✅ Done`, `❌ Reject`, `🔁 Fit layout` (re-render with layout fit and resend).
+- Store `telegram_message_id` on the clip; status `delivered`.
+- **Size limit:** Bot API uploads max 50 MB. Render target bitrate must keep clips under ~45 MB
+  (config `render.video_bitrate`, default ~6 Mbps). If a file is still over 45 MB, re-encode it smaller before sending.
+- After a successful send, delete the local mp4 when `telegram.delete_local_after_send: true` (keep jpg + json).
+- On failure (network, rate limit 429): retry with backoff; leave the clip `rendered` for the next run.
 
-### Worker API
-| Method | Path | Does |
-|---|---|---|
-| GET | `/` | the page |
-| GET | `/api/clips` | list `inbox/*.json`, newest first |
-| GET | `/api/clips/:id/video` | stream mp4 from R2 (supports Range for in-page playback); `?download=1` sets Content-Disposition |
-| GET | `/api/clips/:id/thumb` | jpg |
-| POST | `/api/clips/:id/done` | body `{posted_urls}`; write `done/<id>.json`, delete `inbox/<id>.*` |
-| POST | `/api/clips/:id/reject` | write `done/<id>.json` with `rejected: true`, delete `inbox/<id>.*` |
-
-### Page (mobile-first)
-Card per clip: video player (thumbnail as poster), title, hook, **Copy caption** button (shows "Copied"), **Download**,
-inputs for YouTube / Instagram post URLs, **Open campaign** link (`campaign_submit_url`), **Done** and **Reject**.
-Show a 30-minute reminder after the first URL is pasted ("submit to the campaign before HH:MM").
-Done/Reject ask for a confirm tap (in-page, not `window.confirm`).
+### Bot process `python -m clipper.telegram bot`
+Runs long polling while the Mac is on (launchd agent, KeepAlive) and also does one short poll at the start of every
+pipeline run so nothing is missed.
+- `✅ Done` → ask in-chat "Paste the post links (YouTube / Instagram)" or accept links already sent as a reply;
+  record in `posts` (platform detected from URL), set clip `posted`, edit the message to "✅ Posted HH:MM — submit
+  by HH:MM" and remove the buttons. Then delete the video message after `telegram.delete_after_done_hours` (default 24).
+- `❌ Reject` → clip `rejected`, delete the message, delete any local files.
+- Reply to a clip message with one or more URLs → record them in `posts` for that clip (no need to press Done first).
+- `🔁 Fit layout` → mark clip for re-render with `layout: fit`; the next run renders and sends it as a new message.
+- Commands: `/status` (counts by status + this month's Claude cost), `/pending` (clips delivered but not done),
+  `/help`.
+- Ignore any chat id other than the configured one.
 
 ### Config additions
 ```yaml
-inbox:
+telegram:
   enabled: true
-  r2_endpoint: https://<account_id>.r2.cloudflarestorage.com
-  bucket: clipper-inbox
-  page_url: https://clipper.<subdomain>.workers.dev
-  delete_local_after_upload: true
+  chat_id: null               # set by `python -m clipper.telegram link`
+  max_per_run: 10
+  delete_local_after_send: true
+  delete_after_done_hours: 24
+render:
+  video_bitrate: 6M           # keeps 45 s clips under the 50 MB bot upload limit
 ```
-Campaign entries gain `submit_url` (the campaign page on Content Rewards).
+The token is never in config or git: read from Keychain (`security find-generic-password -s clipper-telegram -w`),
+falling back to env `CLIPPER_TELEGRAM_TOKEN`.
 
-### Setup steps for Sanyam (one-time, ~20 min)
-1. Create a free Cloudflare account; enable R2 (needs a card on file, free tier only).
-2. Create bucket `clipper-inbox`; create an R2 API token (Object Read & Write, this bucket only).
-3. `npm i -g wrangler && wrangler login`; Claude Code deploys the Worker.
-4. Zero Trust → Access → add an application for the Worker URL, policy: email equals Sanyam's email.
+### Tests
+Message formatting (HTML escaping, caption in `<code>`), URL → platform detection, callback handling state changes,
+size check and re-encode decision, unknown chat ids ignored. Mock the Telegram API; no real network in tests.

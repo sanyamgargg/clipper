@@ -18,6 +18,14 @@ pipeline:
   clip_min_sec: 20
   clip_max_sec: 45
 
+telegram:                             # clip inbox (PLAN.md §14); token in Keychain, never here
+  enabled: false
+  chat_id: null                       # set by `python -m clipper.telegram link`
+  keychain_service: clipper-telegram  # security add-generic-password -s clipper-telegram -a bot -w <token>
+  max_per_run: 10
+  delete_local_after_send: true       # keep jpg + json, drop the mp4 once Telegram has it
+  delete_after_done_hours: 24         # then delete the video message from the chat
+
 claude:
   model: sonnet          # sonnet | haiku
   max_turns: 3

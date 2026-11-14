@@ -32,7 +32,7 @@ class Render(BaseModel):
     width: int = 1080
     height: int = 1920
     fps: int = 30
-    video_bitrate: str = "9M"
+    video_bitrate: str = "6M"  # keeps 45 s clips under Telegram's 50 MB bot upload limit
     loudness_lufs: float = -14
     fonts_dir: Path = Path("assets/fonts")  # bundled fonts, handed to libass
     caption_font: str = "Montserrat Black"  # a font in fonts_dir (else a system font)
@@ -56,6 +56,16 @@ class Claude(BaseModel):
     model: str = "sonnet"
     max_turns: int = 3
     timeout_sec: int = 300
+
+
+class Telegram(BaseModel):
+    enabled: bool = False
+    chat_id: int | None = None  # set by `python -m clipper.telegram link`
+    keychain_service: str = "clipper-telegram"  # bot token; env CLIPPER_TELEGRAM_TOKEN wins
+    max_per_run: int = 10
+    max_upload_mb: float = 45  # bot uploads max out at 50 MB; bigger clips are re-encoded
+    delete_local_after_send: bool = True  # keep the jpg + json, drop the mp4
+    delete_after_done_hours: float = 24  # then delete the video message from the chat
 
 
 class Rules(BaseModel):
@@ -90,6 +100,7 @@ class Config(BaseModel):
     machine: Machine = Field(default_factory=Machine)
     pipeline: Pipeline = Field(default_factory=Pipeline)
     render: Render = Field(default_factory=Render)
+    telegram: Telegram = Field(default_factory=Telegram)
     claude: Claude = Field(default_factory=Claude)
     campaigns: list[Campaign] = Field(default_factory=list)
 

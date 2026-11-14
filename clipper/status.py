@@ -15,7 +15,7 @@ from clipper import db
 from clipper.config import load_config
 
 VIDEO_ORDER = (*db.PIPELINE, db.FAILED, db.SKIPPED_TOO_LONG)
-CLIP_ORDER = ("picked", "rendered", "approved", "rejected", "posted", db.FAILED)
+CLIP_ORDER = ("picked", "rendered", "rerender", "delivered", "posted", "rejected", db.FAILED)
 
 
 def _table(headers: list[str], rows: list[list[str]]) -> list[str]:
