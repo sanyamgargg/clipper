@@ -16,11 +16,35 @@ from pydantic import BaseModel, Field, ValidationError
 from clipper import db
 from clipper.config import REPO_ROOT, Campaign, Config
 from clipper.llm.claude_cli import ClaudeCLIError, extract_json, run_claude
-from clipper.timing import Word, load_words, parse_ts, snap_clip
+from clipper.timing import Word, load_words, parse_ts, snap_clip, words_between
 
 log = logging.getLogger(__name__)
 
 PROMPT_PATH = REPO_ROOT / "prompts" / "pick_clips.md"
+HOOK_RULES_PATH = REPO_ROOT / "prompts" / "hook_rules.md"
+REHOOK_PATH = REPO_ROOT / "prompts" / "regenerate_hook.md"
+HOOK_WORDS = (6, 10)
+
+
+def fill(template: str, values: dict[str, str]) -> str:
+    for key, value in values.items():
+        template = template.replace("{{" + key + "}}", value)
+    return template
+
+
+def hook_problems(hook: str) -> list[str]:
+    """Hook rules that can be checked mechanically (prompts/hook_rules.md)."""
+    words = hook.split()
+    problems = []
+    lo, hi = HOOK_WORDS
+    if not lo <= len(words) <= hi:
+        problems.append(f"{len(words)} words instead of {lo}-{hi}")
+    shouting = [w for w in words if sum(c.isalpha() for c in w) >= 4 and w.upper() == w]
+    if shouting:
+        problems.append(f"ALL CAPS words: {', '.join(shouting)}")
+    if any(c in hook for c in '!#"“”'):
+        problems.append("no exclamation marks, hashtags or quotation marks")
+    return problems
 
 
 class PickedClip(BaseModel):
@@ -88,13 +112,62 @@ def build_prompt(cfg: Config, campaign: Campaign, compact: str) -> str:
         "TARGET_MIN_SEC": f"{max(lo, p.clip_target_min_sec):g}",
         "TARGET_MAX_SEC": f"{min(hi, p.clip_target_max_sec):g}",
         "STORY_MAX_SEC": f"{story_hi:g}",
+        "HOOK_RULES": HOOK_RULES_PATH.read_text().strip(),
         "CAMPAIGN_RULES": campaign_rules_text(campaign),
         "TRANSCRIPT": compact.strip(),
     }
-    prompt = PROMPT_PATH.read_text()
-    for key, value in values.items():
-        prompt = prompt.replace("{{" + key + "}}", value)
-    return prompt
+    return fill(PROMPT_PATH.read_text(), values)
+
+
+class HookReply(BaseModel):
+    hook_text: str = Field(min_length=1)
+
+
+def _parse_hook(text: str) -> str:
+    hook = HookReply.model_validate(extract_json(text)).hook_text
+    return " ".join(hook.strip().strip("\"“”'").split()).rstrip(".")
+
+
+def regenerate_hook(
+    cfg: Config,
+    conn: sqlite3.Connection,
+    clip: Clip,
+    campaign: Campaign,
+    words: list[Word],
+    video_title: str,
+) -> str:
+    """A new hook for an existing clip, written from what is said in it (one Claude call,
+    plus one retry if the reply breaks the hook rules). Raises ClaudeCLIError/ValueError."""
+    said = " ".join(w.w for w in words_between(words, clip.start_sec, clip.end_sec))
+    prompt = fill(
+        REHOOK_PATH.read_text(),
+        {
+            "HOOK_RULES": HOOK_RULES_PATH.read_text().strip(),
+            "CAMPAIGN": campaign.name,
+            "VIDEO_TITLE": video_title or "(unknown)",
+            "CLIP_TITLE": clip.title,
+            "OLD_HOOK": clip.hook_text,
+            "CLIP_TRANSCRIPT": said,
+        },
+    )
+    reply = _ask(cfg, conn, clip.video_id, prompt)
+    try:
+        hook = _parse_hook(reply)
+    except (ValueError, ValidationError):
+        hook = ""
+    if problems := (hook_problems(hook) if hook else ["no valid JSON"]):
+        log.warning("%s: hook %r breaks the rules (%s); asking once more",
+                    clip.id, hook, "; ".join(problems))  # fmt: skip
+        fix = (
+            f"Your hook {hook!r} breaks these rules: {'; '.join(problems)}.\n"
+            'Return ONLY the corrected JSON object {"hook_text": "..."}.\n\n' + prompt
+        )
+        retry = _parse_hook(_ask(cfg, conn, clip.video_id, fix))
+        if not hook or len(hook_problems(retry)) <= len(problems):
+            hook = retry
+        if left := hook_problems(hook):
+            log.warning("%s: using hook %r anyway (%s)", clip.id, hook, "; ".join(left))
+    return hook
 
 
 def parse_response(text: str) -> PickResponse:

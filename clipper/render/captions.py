@@ -31,7 +31,15 @@ POP_FROM = 0.85  # pop-in starts at this scale
 CAPTION_POP_MS = 80
 
 # hook
-HookStyle = Literal["box", "outline"]
+HookStyle = Literal["box", "outline", "titlecard"]
+# titlecard: rounded semi-transparent bar near the top, plain white text, whole clip
+TITLECARD_FADE_MS = 150
+TITLECARD_PAD_X_EM = 0.55
+TITLECARD_PAD_Y_EM = 0.45
+TITLECARD_PITCH_EM = 1.25  # baseline to baseline between the two lines
+TITLECARD_RADIUS_EM = 0.35
+TITLECARD_MARGIN = 60  # min gap between the bar and the frame edge
+KAPPA = 0.5523  # bezier control distance for a quarter circle
 HOOK_POP_MS = 120
 HOOK_FADE_MS = 200
 HOOK_OUTLINE_EM = 0.10  # outline style: outline thickness
@@ -359,6 +367,83 @@ def layout_hook(
     return HookLayout(lines, px, round(center), round(top), round(top + block))
 
 
+@dataclass(frozen=True)
+class TitleCard:
+    lines: list[str]
+    px: int  # em height
+    left: int  # bar edges
+    top: int
+    right: int
+    bottom: int
+    line_ys: list[int]  # \an5 anchor of each line
+
+
+def layout_titlecard(
+    text: str,
+    metrics: FontMetrics,
+    *,
+    width: int,
+    height: int,
+    max_px: float,
+    top_frac: float,
+) -> TitleCard | None:
+    """Title card: 1 or 2 lines at up to `max_px` (smaller only if a line would not fit
+    the width), in a bar whose top is at `top_frac` of the height, text centred in it."""
+    words = text.split()
+    if not words:
+        return None
+    candidates = [[" ".join(words)]] + [
+        [" ".join(words[:k]), " ".join(words[k:])] for k in range(1, len(words))
+    ]
+    best: tuple[tuple[int, int, float], list[str]] | None = None
+    for lines in candidates:
+        widest = max(metrics.width(line, 1.0) for line in lines)
+        px = min(max_px, (width - 2 * TITLECARD_MARGIN) / (widest + 2 * TITLECARD_PAD_X_EM))
+        key = (math.floor(px), -len(lines), -widest)  # biggest, then fewer, then balanced
+        if best is None or key > best[0]:
+            best = (key, lines)
+    assert best is not None
+    (px, _, _), lines = best
+
+    unit = px / metrics.upm  # pixels per font unit
+    cap = metrics.cap * unit
+    pitch, pad_y, pad_x = TITLECARD_PITCH_EM * px, TITLECARD_PAD_Y_EM * px, TITLECARD_PAD_X_EM * px
+    top = top_frac * height
+    bottom = top + 2 * pad_y + cap + (len(lines) - 1) * pitch
+    text_w = max(metrics.width(line, px) for line in lines)
+    left = (width - text_w) / 2 - pad_x
+    # libass centres a line on its cell (winAscent..winDescent); shift from the baseline
+    cell_offset = (metrics.cell - 2 * metrics.ascent) / 2 * unit
+    baselines = [top + pad_y + cap + i * pitch for i in range(len(lines))]
+    return TitleCard(
+        lines=lines,
+        px=px,
+        left=round(left),
+        top=round(top),
+        right=round(width - left),
+        bottom=round(bottom),
+        line_ys=[round(b + cell_offset) for b in baselines],
+    )
+
+
+def rounded_rect(width: float, height: float, radius: float) -> str:
+    """ASS drawing (\\p1) of a rounded rectangle with its top-left corner at 0,0."""
+    w, h = width, height
+    r = min(radius, w / 2, h / 2)
+    k = KAPPA * r
+    pts = [
+        ("m", r, 0), ("l", w - r, 0), ("b", w - r + k, 0, w, r - k, w, r),
+        ("l", w, h - r), ("b", w, h - r + k, w - r + k, h, w - r, h),
+        ("l", r, h), ("b", r - k, h, 0, h - r + k, 0, h - r),
+        ("l", 0, r), ("b", 0, r - k, r - k, 0, r, 0),
+    ]  # fmt: skip
+    return " ".join(f"{op} " + " ".join(str(round(v)) for v in xy) for op, *xy in pts)
+
+
+def sentence_case(text: str) -> str:
+    return text[:1].upper() + text[1:]
+
+
 def is_caps_word(word: str) -> bool:
     letters = [c for c in word if c.isalpha()]
     return len(letters) >= 2 and all(c.isupper() for c in letters)
@@ -390,8 +475,12 @@ class CaptionStyle:
     caption_max_y_frac: float = 0.78  # ...but never lower than this
     caption_deadband: float = 0.02  # ignore position changes smaller than this
     caption_step: float = 0.03  # move back up at most this much per chunk
-    hook_style: HookStyle = "outline"
-    hook_sec: float = 3.0
+    hook_style: HookStyle = "titlecard"
+    hook_font: str = "Montserrat SemiBold"  # titlecard only
+    titlecard_px: float = 64
+    titlecard_top_frac: float = 0.08
+    titlecard_opacity: float = 0.7  # of the black bar
+    hook_sec: float = 3.0  # box / outline: on screen this long (titlecard: whole clip)
     hook_max_px: float = 150
     hook_min_px: float = 90
     hook_fallback_top_frac: float = 0.09
@@ -424,7 +513,26 @@ HOOK_STYLES = {
     # black text on an opaque white box; BorderStyle 3 draws the box, Outline pads it
     "box": "Style: Hook,{font},{size},&H00000000,&H00000000,&H00FFFFFF,&H00FFFFFF,"
     "-1,0,0,0,100,100,0,0,3,{pad},0,5,0,0,0,1",
+    # plain white text (Bold 0: SemiBold is the weight) on a separately drawn bar
+    "titlecard": "Style: Hook,{font},{size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,"
+    "0,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1\n"
+    "Style: Bar,{font},20,&H{alpha:02X}000000,&H{alpha:02X}000000,&H00000000,&H00000000,"
+    "0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1",
 }
+
+
+def _titlecard_events(card: TitleCard, s: CaptionStyle, end: float) -> list[str]:
+    fade = f"\\fad({TITLECARD_FADE_MS},0)"
+    span = f"{ass_time(0)},{ass_time(end)}"
+    path = rounded_rect(
+        card.right - card.left, card.bottom - card.top, TITLECARD_RADIUS_EM * card.px
+    )
+    bar_tags = f"{{\\an7\\pos({card.left},{card.top}){fade}\\p1}}"
+    events = [f"Dialogue: 2,{span},Bar,,0,0,0,,{bar_tags}{path}{{\\p0}}\n"]
+    for line, y in zip(card.lines, card.line_ys, strict=True):
+        events.append(f"Dialogue: 3,{span},Hook,,0,0,0,,"
+                      f"{{\\an5\\pos({s.width // 2},{y})\\q2{fade}}}{line}\n")  # fmt: skip
+    return events
 
 
 def ass_time(sec: float) -> str:
@@ -440,12 +548,73 @@ def build_ass(
     face_top: float | None = None,
     face_bottoms: list[float | None] | None = None,
     sample_fps: float = 5,
+    hook_metrics: FontMetrics | None = None,
+    duration: float | None = None,
 ) -> str:
     """Full ASS file. `words` are caption words relative to the clip start (t=0);
     `face_top` is the face's top edge while the hook shows and `face_bottoms` its bottom
-    edge per sample (`sample_fps`), both in output pixels."""
+    edge per sample (`sample_fps`), both in output pixels. Title cards use
+    `hook_metrics` (the hook font) and stay up for `duration`."""
     s = style
     clean = " ".join(hook_text.replace("{", "").replace("}", "").replace("\\", "").split())
+    hook_events: list[str] = []
+    if s.hook_style == "titlecard":
+        hm = hook_metrics or metrics
+        card = layout_titlecard(
+            sentence_case(clean),
+            hm,
+            width=s.width,
+            height=s.height,
+            max_px=s.titlecard_px,
+            top_frac=s.titlecard_top_frac,
+        )
+        hook_style = HOOK_STYLES["titlecard"].format(
+            font=s.hook_font,
+            size=hm.ass_size(card.px if card else s.titlecard_px),
+            alpha=round((1 - s.titlecard_opacity) * 255),
+        )
+        if card:
+            hook_events = _titlecard_events(card, s, duration or s.hook_sec)
+    else:
+        hook_style, hook_events = _classic_hook(clean, s, metrics, face_top)
+    lines = [
+        HEADER.format(
+            width=s.width,
+            height=s.height,
+            font=s.font,
+            caption_size=metrics.ass_size(s.caption_px),
+            spacing=CAPTION_SPACING,
+            outline=CAPTION_OUTLINE,
+            shadow=CAPTION_SHADOW,
+            margin=CAPTION_MARGIN,
+            hook_style=hook_style,
+        ),
+        *hook_events,
+    ]
+    chunks = chunk_words(words)
+    ys = caption_ys(
+        chunks,
+        face_bottoms,
+        default_y=s.height * s.caption_y_frac,
+        gap=s.height * s.caption_face_gap,
+        max_y=s.height * s.caption_max_y_frac,
+        sample_fps=sample_fps,
+        deadband=s.height * s.caption_deadband,
+        step=s.height * s.caption_step,
+    )
+    positions = [(s.width // 2, y) for y in ys]
+    max_width = s.width - 2 * CAPTION_MARGIN
+    for start, end, text in caption_events(
+        chunks, metrics, s.caption_px, max_width, positions=positions
+    ):
+        lines.append(f"Dialogue: 1,{ass_time(start)},{ass_time(end)},Caption,,0,0,0,,{text}\n")
+    return "".join(lines)
+
+
+def _classic_hook(
+    clean: str, s: CaptionStyle, metrics: FontMetrics, face_top: float | None
+) -> tuple[str, list[str]]:
+    """Style line and events for the big box / outline hook above the face."""
     hook = layout_hook(
         clean,
         metrics,
@@ -466,44 +635,15 @@ def build_ass(
         shadow=max(2, round(HOOK_SHADOW_EM * hook_px)),
         pad=round(HOOK_BOX_PAD_EM * hook_px),
     )
-    lines = [
-        HEADER.format(
-            width=s.width,
-            height=s.height,
-            font=s.font,
-            caption_size=metrics.ass_size(s.caption_px),
-            spacing=CAPTION_SPACING,
-            outline=CAPTION_OUTLINE,
-            shadow=CAPTION_SHADOW,
-            margin=CAPTION_MARGIN,
-            hook_style=hook_style,
-        )
-    ]
+    events: list[str] = []
     if hook and s.hook_sec > 0:
         # \q2: no automatic wrapping; the layout already decided the lines
         tags = (
             f"{{\\an5\\pos({s.width // 2},{hook.center_y})\\q2"
             f"{_scale(100, HOOK_POP_MS)}\\fad(0,{HOOK_FADE_MS})}}"
         )
-        lines.append(
+        events.append(
             f"Dialogue: 0,{ass_time(0)},{ass_time(s.hook_sec)},Hook,,0,0,0,,"
             f"{tags}{hook_markup(hook.lines, s.hook_style)}\n"
         )
-    chunks = chunk_words(words)
-    ys = caption_ys(
-        chunks,
-        face_bottoms,
-        default_y=s.height * s.caption_y_frac,
-        gap=s.height * s.caption_face_gap,
-        max_y=s.height * s.caption_max_y_frac,
-        sample_fps=sample_fps,
-        deadband=s.height * s.caption_deadband,
-        step=s.height * s.caption_step,
-    )
-    positions = [(s.width // 2, y) for y in ys]
-    max_width = s.width - 2 * CAPTION_MARGIN
-    for start, end, text in caption_events(
-        chunks, metrics, s.caption_px, max_width, positions=positions
-    ):
-        lines.append(f"Dialogue: 1,{ass_time(start)},{ass_time(end)},Caption,,0,0,0,,{text}\n")
-    return "".join(lines)
+    return hook_style, events

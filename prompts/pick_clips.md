@@ -23,6 +23,9 @@ standalone YouTube Shorts / Instagram Reels.
 Prefer: bold opinions, surprising numbers, stories with a twist, practical tips, funny exchanges, disagreements.
 Avoid: sponsor reads, intros/outros, inside references, segments that depend on visuals not described in speech.
 
+## Hook text
+{{HOOK_RULES}}
+
 ## Campaign rules
 {{CAMPAIGN_RULES}}
 
@@ -34,7 +37,7 @@ Return ONLY valid JSON, no prose, no code fences:
     {
       "start": "mm:ss",
       "end": "mm:ss",
-      "hook_text": "max 5 words and 28 characters, shown very large for the first 3 seconds; it replaces the setup you cut; write the 1-2 key words in ALL CAPS (they are highlighted)",
+      "hook_text": "6-10 words, concrete, sentence case: see Hook text",
       "title": "max 70 chars, curiosity-driven, no clickbait lies",
       "reason": "one sentence: why this will hold attention",
       "score": 0.0,

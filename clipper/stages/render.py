@@ -32,6 +32,10 @@ def _caption_style(cfg: Config, fit: bool) -> CaptionStyle:
         caption_face_gap=r.caption_face_gap,
         caption_max_y_frac=r.caption_max_y_frac,
         hook_style=r.hook_style,
+        hook_font=r.hook_font,
+        titlecard_px=r.titlecard_font_size,
+        titlecard_top_frac=r.titlecard_top_frac,
+        titlecard_opacity=r.titlecard_opacity,
         hook_sec=r.hook_sec,
         hook_max_px=r.hook_font_size,
         hook_min_px=r.hook_min_font_size,
@@ -40,9 +44,18 @@ def _caption_style(cfg: Config, fit: bool) -> CaptionStyle:
     )
 
 
-def _fonts(cfg: Config, work: Path) -> tuple[FontMetrics, str | None]:
+def _metrics(fonts_dir: Path, family: str) -> FontMetrics:
+    metrics = FontMetrics.find(fonts_dir, family)
+    if metrics is None:
+        log.warning("font %r not found in %s: libass picks a system font, sizes are estimated",
+                    family, fonts_dir)  # fmt: skip
+        return ESTIMATED
+    return metrics
+
+
+def _fonts(cfg: Config, work: Path) -> tuple[FontMetrics, FontMetrics, str | None]:
     """Copy the bundled fonts into the work dir (so the filter path needs no escaping)
-    and measure the caption font. Falls back to estimated metrics and system fonts."""
+    and measure the caption and hook fonts. Falls back to estimates and system fonts."""
     src = cfg.fonts_dir
     files = [p for p in sorted(src.glob("*")) if p.suffix.lower() in FONT_SUFFIXES]
     fonts_arg = None
@@ -51,12 +64,7 @@ def _fonts(cfg: Config, work: Path) -> tuple[FontMetrics, str | None]:
         for p in files:
             shutil.copy2(p, work / "fonts" / p.name)
         fonts_arg = "fonts"
-    metrics = FontMetrics.find(src, cfg.render.caption_font)
-    if metrics is None:
-        log.warning("font %r not found in %s: libass picks a system font, sizes are estimated",
-                    cfg.render.caption_font, src)  # fmt: skip
-        metrics = ESTIMATED
-    return metrics, fonts_arg
+    return _metrics(src, cfg.render.caption_font), _metrics(src, cfg.render.hook_font), fonts_arg
 
 
 def render_clip(
@@ -113,12 +121,12 @@ def render_clip(
         bottoms = [None if b is None else out_y(b) for b in facetrack.face_bottoms(subjects)]
 
         # 2. captions + hook
-        metrics, fonts_arg = _fonts(cfg, work)
+        metrics, hook_metrics, fonts_arg = _fonts(cfg, work)
         cap_words = caption_words(
             words_between(words, clip.start_sec, clip.end_sec), campaign.caption_fixes
         )
         ass = build_ass(cap_words, clip.hook_text, _caption_style(cfg, fit), metrics, face_y,
-                        bottoms, facetrack.SAMPLE_FPS)  # fmt: skip
+                        bottoms, facetrack.SAMPLE_FPS, hook_metrics, duration)  # fmt: skip
         (work / "captions.ass").write_text(ass)
 
         # 3. encode to a temp name, so a crash never leaves a half-written clip in place

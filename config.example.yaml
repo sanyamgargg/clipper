@@ -8,7 +8,8 @@ machine:
 render:
   caption_font: Montserrat Black      # bundled in assets/fonts (OFL)
   caption_font_size: 90               # em height in px at 1080 wide
-  hook_style: outline                 # outline (white, black outline, CAPS words yellow) | box
+  hook_style: titlecard               # titlecard (bar at the top, whole clip) | outline | box
+  hook_font: Montserrat SemiBold      # titlecard text, bundled in assets/fonts (OFL)
 
 pipeline:
   videos_per_night: 2

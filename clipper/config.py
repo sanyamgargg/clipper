@@ -44,8 +44,12 @@ class Render(BaseModel):
     caption_y_frac_fit: float = 0.72  # fit layout: captions sit below the video band
     caption_face_gap: float = 0.04  # caption y >= face bottom + this (fraction of height)
     caption_max_y_frac: float = 0.78  # but never below this
-    hook_style: Literal["box", "outline"] = "outline"
-    hook_sec: float = 3.0
+    hook_style: Literal["box", "outline", "titlecard"] = "titlecard"
+    hook_font: str = "Montserrat SemiBold"  # titlecard text, a font in fonts_dir
+    titlecard_font_size: int = 64  # em height in px; smaller only if a line would not fit
+    titlecard_top_frac: float = 0.08  # bar top, as a fraction of frame height
+    titlecard_opacity: float = 0.7  # of the black bar
+    hook_sec: float = 3.0  # box / outline only; a title card stays for the whole clip
     hook_font_size: int = 150  # largest em height in px; shrinks to fit width / face
     hook_min_font_size: int = 90  # never smaller, even if it then overlaps the head
     hook_fallback_top_frac: float = 0.09  # hook top when no face is found

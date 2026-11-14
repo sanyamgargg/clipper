@@ -66,7 +66,7 @@ MIGRATIONS = (
 # Clip statuses: picked -> rendered -> delivered (sent to Telegram) -> posted | rejected.
 # `rerender` = asked for again (e.g. Fit layout); failed as for videos.
 CLIP_COLUMNS = frozenset(
-    {"status", "layout", "file_path", "telegram_message_id", "links_prompt_id",
+    {"status", "layout", "file_path", "hook_text", "telegram_message_id", "links_prompt_id",
      "delivered_at", "done_at", "message_deleted"}
 )  # fmt: skip
 

@@ -20,6 +20,8 @@ from clipper.render.captions import (
     hook_markup,
     is_caps_word,
     layout_hook,
+    layout_titlecard,
+    rounded_rect,
 )
 from clipper.timing import Word
 
@@ -312,7 +314,7 @@ def test_build_ass_box_hook(montserrat):
 
 
 def test_build_ass_places_hook_above_the_face(montserrat):
-    style = CaptionStyle()
+    style = CaptionStyle(hook_style="outline")
     no_face = build_ass([], "Red flag", style, montserrat)
     face = build_ass([], "Red flag", style, montserrat, face_top=1000)
 
@@ -327,3 +329,67 @@ def test_build_ass_moves_captions_below_the_face(montserrat):
     words = make_words("one two three four five six seven")  # 3 chunks over ~1.75 s
     ass = build_ass(words, "", CaptionStyle(), montserrat, face_bottoms=[1400.0] * 10)
     assert ass.count("\\an5\\pos(540,1477)") == 7  # 1400 + 4% of 1920, every word event
+
+
+# --- title card -----------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def semibold() -> FontMetrics:
+    metrics = FontMetrics.find(FONTS, "Montserrat SemiBold")
+    assert metrics is not None, "bundled font missing from assets/fonts"
+    return metrics
+
+
+CARD = {"width": 1080, "height": 1920, "max_px": 64, "top_frac": 0.08}
+
+
+def test_titlecard_sits_at_8_percent_and_is_64px(semibold):
+    card = layout_titlecard("TJR's 5:30 AM routine as a $10M trader", semibold, **CARD)
+    assert card.px == 64 and card.top == round(0.08 * 1920)
+    assert 1 <= len(card.lines) <= 2
+    assert card.left >= 60 and card.right <= 1080 - 60  # inside the margins
+    assert card.left + card.right == 1080  # centred
+    assert all(card.top < y < card.bottom for y in card.line_ys)
+    if len(card.lines) == 2:
+        assert card.line_ys[1] - card.line_ys[0] == round(1.25 * 64)
+
+
+def test_titlecard_prefers_one_line_and_never_exceeds_two(semibold):
+    short = layout_titlecard("Why TJR left college", semibold, **CARD)
+    assert short.lines == ["Why TJR left college"] and short.px == 64
+    long = layout_titlecard("word " * 30, semibold, **CARD)
+    assert len(long.lines) == 2 and long.px < 64  # shrinks only to fit the width
+    widest = max(semibold.width(line, long.px) for line in long.lines)
+    assert widest + 2 * 0.55 * long.px <= 1080 - 2 * 60 + 1
+    assert layout_titlecard("", semibold, **CARD) is None
+
+
+def test_rounded_rect_path_closes_at_its_start():
+    path = rounded_rect(400, 100, 20)
+    assert path.startswith("m 20 0 l 380 0 b ")
+    assert path.endswith(" 20 0")
+    assert rounded_rect(40, 10, 99).startswith("m 5 0")  # radius limited to half the height
+
+
+def test_build_ass_titlecard(montserrat, semibold):
+    ass = build_ass(
+        make_words("Hello there."),
+        "tJR's 5:30 AM routine as a $10M trader",
+        CaptionStyle(),  # titlecard is the default
+        montserrat,
+        hook_metrics=semibold,
+        duration=27.5,
+    )
+    styles = {line.split(",")[0]: line for line in ass.splitlines() if line.startswith("Style:")}
+    hook = styles["Style: Hook"]
+    assert hook.startswith("Style: Hook,Montserrat SemiBold,100,&H00FFFFFF,")  # 64 px em
+    assert ",0,0,0,0,100,100,0,0,1,0,0,5," in hook  # not bold, no outline, no shadow
+    assert styles["Style: Bar"].startswith("Style: Bar,Montserrat SemiBold,20,&H4D000000,")
+    bar = next(line for line in ass.splitlines() if ",Bar,," in line)
+    assert bar.startswith("Dialogue: 2,0:00:00.00,0:00:27.50,Bar,")  # the whole clip
+    assert "\\an7\\pos(" in bar and "\\fad(150,0)\\p1}m " in bar
+    texts = [line for line in ass.splitlines() if ",Hook,," in line]
+    assert 1 <= len(texts) <= 2
+    assert all("\\fad(150,0)" in t and "\\fscx" not in t and YELLOW not in t for t in texts)
+    assert texts[0].split("}", 1)[1].startswith("TJR's")  # sentence case

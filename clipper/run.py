@@ -26,7 +26,7 @@ from clipper.llm.claude_cli import ClaudeCLIError
 from clipper.proc import AlreadyRunning, lock_held, run_lock
 from clipper.stages.discover import discover
 from clipper.stages.fetch import VideoMeta, fetch_audio, fetch_segment, probe
-from clipper.stages.pick import Clip, load_clips, pick, save_clips
+from clipper.stages.pick import Clip, load_clips, pick, regenerate_hook, save_clips
 from clipper.stages.render import render_clip
 from clipper.stages.transcribe import transcribe
 from clipper.telegram.api import TelegramError
@@ -262,19 +262,26 @@ def stage_rerender(cfg: Config, conn: sqlite3.Connection) -> int:
     return failures
 
 
-def rerender_all(cfg: Config, conn: sqlite3.Connection) -> int:
+def rerender_all(cfg: Config, conn: sqlite3.Connection, new_hook: bool = False) -> int:
     """Render every rendered or delivered clip again with the current styling."""
     ids = [r["id"] for status in ("rendered", "delivered") for r in db.clips_in(conn, status)]
     log.info("re-rendering %d clip(s)", len(ids))
-    failed = [cid for cid in ids if rerender(cfg, conn, cid, None) != EXIT_OK]
+    failed = [cid for cid in ids if rerender(cfg, conn, cid, None, new_hook) != EXIT_OK]
     if failed:
         log.error("failed: %s", ", ".join(failed))
     return EXIT_FAILURES if failed else EXIT_OK
 
 
-def rerender(cfg: Config, conn: sqlite3.Connection, clip_id: str, layout: str | None) -> int:
-    """Render one already-picked clip again, optionally switching its layout. The segment
-    is downloaded again (sources are deleted after the first render)."""
+def rerender(
+    cfg: Config,
+    conn: sqlite3.Connection,
+    clip_id: str,
+    layout: str | None,
+    new_hook: bool = False,
+) -> int:
+    """Render one already-picked clip again, optionally switching its layout and asking
+    Claude for a new hook. The segment is downloaded again (sources are deleted after
+    the first render)."""
     ensure_free_space(cfg.data_dir, cfg.machine.min_free_gb)
     video_id = clip_id.rsplit("_", 1)[0]
     clips_path = cfg.dir("transcripts") / f"{video_id}.clips.json"
@@ -294,6 +301,18 @@ def rerender(cfg: Config, conn: sqlite3.Connection, clip_id: str, layout: str | 
         save_clips(clips, clips_path)
 
     words = load_words(cfg.dir("transcripts") / f"{video_id}.words.json")
+    if new_hook:
+        video = db.get_video(conn, video_id)
+        try:
+            hook = regenerate_hook(cfg, conn, clip, cfg.campaign(video["campaign_id"]), words,
+                                   video["title"] or "")  # fmt: skip
+        except (ClaudeCLIError, ValueError) as exc:
+            log.error("%s: no new hook: %s", clip.id, exc)
+            return EXIT_CLAUDE
+        log.info("%s: hook %r -> %r", clip.id, clip.hook_text, hook)
+        clip.hook_text = hook
+        save_clips(clips, clips_path)
+        db.update_clip(conn, clip.id, hook_text=hook)
     ok = _render_one(cfg, conn, VideoMeta.load(info_path), index, clip, words)
     return EXIT_OK if ok else EXIT_FAILURES
 
@@ -311,11 +330,16 @@ def main(argv: list[str] | None = None) -> int:
         "--rerender-all", action="store_true", help="render all rendered/delivered clips again"
     )
     parser.add_argument("--layout", choices=["crop", "fit"], help="with --rerender: new layout")
+    parser.add_argument(
+        "--new-hook", action="store_true", help="with --rerender(-all): ask Claude for a new hook"
+    )
     parser.add_argument("--campaign", help="with --url: campaign id (default: first active)")
     parser.add_argument("--config", type=Path, help="path to config.yaml")
     args = parser.parse_args(argv)
     if args.layout and not args.rerender:
         parser.error("--layout needs --rerender (new clips use render.default_layout)")
+    if args.new_hook and not (args.rerender or args.rerender_all):
+        parser.error("--new-hook needs --rerender or --rerender-all")
 
     cfg = load_config(args.config)
     logging.basicConfig(
@@ -329,9 +353,9 @@ def main(argv: list[str] | None = None) -> int:
             conn = db.connect(cfg.data_dir)
             try:
                 if args.rerender:
-                    return rerender(cfg, conn, args.rerender, args.layout)
+                    return rerender(cfg, conn, args.rerender, args.layout, args.new_hook)
                 if args.rerender_all:
-                    return rerender_all(cfg, conn)
+                    return rerender_all(cfg, conn, args.new_hook)
                 if args.url:
                     add_url(cfg, conn, args.campaign, args.url)
                 return run_pipeline(cfg, conn, discover_new=not args.url)
