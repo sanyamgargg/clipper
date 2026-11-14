@@ -1,25 +1,38 @@
-"""SQLite state (data/clipper.db): schema + small helpers."""
+"""SQLite state (data/clipper.db): schema, status machine and small helpers.
+
+Video status machine:
+    new -> audio_downloaded -> transcribed -> picked -> rendered -> done
+A stage takes videos in one status and advances them to the next. A failure parks the
+video in `failed` (with error text, attempts and the status it failed in); the next run
+puts it back, up to `max_retries` times. `skipped_too_long` is terminal.
+Clips: picked -> rendered, or failed (retried the same way).
+"""
 
 from __future__ import annotations
 
 import logging
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+PIPELINE = ("new", "audio_downloaded", "transcribed", "picked", "rendered", "done")
+FAILED = "failed"
+SKIPPED_TOO_LONG = "skipped_too_long"
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS campaigns(id TEXT PRIMARY KEY, name TEXT, rate_per_1k REAL, active INT);
 CREATE TABLE IF NOT EXISTS videos(
     id TEXT PRIMARY KEY, campaign_id TEXT, url TEXT, title TEXT, duration_sec REAL,
-    status TEXT, error TEXT, created_at TEXT, updated_at TEXT);
+    status TEXT, error TEXT, created_at TEXT, updated_at TEXT,
+    attempts INTEGER DEFAULT 0, failed_status TEXT, upload_date TEXT);
 CREATE TABLE IF NOT EXISTS clips(
     id TEXT PRIMARY KEY, video_id TEXT, start_sec REAL, end_sec REAL, hook_text TEXT, title TEXT,
     reason TEXT, score REAL, status TEXT, file_path TEXT, created_at TEXT,
-    layout TEXT DEFAULT 'crop');
+    layout TEXT DEFAULT 'crop', attempts INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS posts(
     id INTEGER PRIMARY KEY, clip_id TEXT, platform TEXT, url TEXT, posted_at TEXT, views INT,
     views_checked_at TEXT, submitted_to_campaign INT, campaign_status TEXT, earnings REAL);
@@ -31,19 +44,39 @@ CREATE TABLE IF NOT EXISTS llm_calls(
     cost_usd REAL, exit_code INT, created_at TEXT);
 """
 
+# columns added after a table first shipped: (table, column, definition)
+MIGRATIONS = (
+    ("clips", "layout", "TEXT DEFAULT 'crop'"),
+    ("clips", "attempts", "INTEGER DEFAULT 0"),
+    ("videos", "attempts", "INTEGER DEFAULT 0"),
+    ("videos", "failed_status", "TEXT"),
+    ("videos", "upload_date", "TEXT"),
+)
+
 
 def now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+def next_status(status: str) -> str:
+    """The status after `status` in the pipeline. ValueError if there is none."""
+    if status not in PIPELINE[:-1]:
+        raise ValueError(f"no status after {status!r}")
+    return PIPELINE[PIPELINE.index(status) + 1]
+
+
 def connect(data_dir: Path) -> sqlite3.Connection:
     data_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(data_dir / "clipper.db", isolation_level=None)  # autocommit
+    conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
-    # migration: databases created before the layout setting existed
-    if "layout" not in {row[1] for row in conn.execute("PRAGMA table_info(clips)")}:
-        conn.execute("ALTER TABLE clips ADD COLUMN layout TEXT DEFAULT 'crop'")
+    for table, column, definition in MIGRATIONS:
+        if column not in {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
     return conn
+
+
+# --- run / llm logging ------------------------------------------------------
 
 
 @contextmanager
@@ -86,34 +119,109 @@ def log_llm_call(
     )
 
 
-def upsert_video(
+# --- campaigns ---------------------------------------------------------------
+
+
+def sync_campaigns(conn: sqlite3.Connection, campaigns: Iterable) -> None:
+    """Mirror config campaigns (id, name, rate_per_1k, active) into the table."""
+    for c in campaigns:
+        conn.execute(
+            "INSERT INTO campaigns(id, name, rate_per_1k, active) VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(id) DO UPDATE SET name = excluded.name,"
+            " rate_per_1k = excluded.rate_per_1k, active = excluded.active",
+            (c.id, c.name, c.rate_per_1k, int(c.active)),
+        )
+
+
+# --- videos ------------------------------------------------------------------
+
+
+def known_video_ids(conn: sqlite3.Connection) -> set[str]:
+    return {row["id"] for row in conn.execute("SELECT id FROM videos")}
+
+
+def add_video(
     conn: sqlite3.Connection,
     video_id: str,
     campaign_id: str,
     url: str,
     title: str,
     duration_sec: float,
-    status: str,
-) -> None:
+    upload_date: str = "",
+    status: str = "new",
+) -> bool:
+    """Insert a video unless its id is already known. Returns True if it was inserted."""
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO videos(id, campaign_id, url, title, duration_sec, upload_date,"
+        " status, attempts, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+        (video_id, campaign_id, url, title, duration_sec, upload_date, status, now(), now()),
+    )
+    return cur.rowcount == 1
+
+
+def get_video(conn: sqlite3.Connection, video_id: str) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM videos WHERE id = ?", (video_id,)).fetchone()
+
+
+def videos_in(conn: sqlite3.Connection, status: str) -> list[sqlite3.Row]:
+    """Videos waiting in `status`, oldest first."""
+    return conn.execute(
+        "SELECT * FROM videos WHERE status = ? ORDER BY created_at, rowid", (status,)
+    ).fetchall()
+
+
+def advance_video(conn: sqlite3.Connection, video_id: str) -> str:
+    """Move a video to the next pipeline status; clears its error and attempts."""
+    row = get_video(conn, video_id)
+    if row is None:
+        raise KeyError(video_id)
+    new = next_status(row["status"])
     conn.execute(
-        "INSERT INTO videos(id, campaign_id, url, title, duration_sec, status, created_at,"
-        " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-        " ON CONFLICT(id) DO UPDATE SET status = excluded.status, error = NULL,"
-        " updated_at = excluded.updated_at",
-        (video_id, campaign_id, url, title, duration_sec, status, now(), now()),
+        "UPDATE videos SET status = ?, error = NULL, attempts = 0, failed_status = NULL,"
+        " updated_at = ? WHERE id = ?",
+        (new, now(), video_id),
+    )
+    return new
+
+
+def fail_video(conn: sqlite3.Connection, video_id: str, error: str) -> None:
+    """Park a video in `failed`, remembering the status it failed in."""
+    conn.execute(
+        "UPDATE videos SET failed_status = status, status = ?, error = ?,"
+        " attempts = COALESCE(attempts, 0) + 1, updated_at = ? WHERE id = ? AND status != ?",
+        (FAILED, error, now(), video_id, FAILED),
     )
 
 
-def set_video_status(
-    conn: sqlite3.Connection, video_id: str, status: str, error: str | None = None
-) -> None:
-    conn.execute(
-        "UPDATE videos SET status = ?, error = ?, updated_at = ? WHERE id = ?",
-        (status, error, now(), video_id),
-    )
+def requeue_failed(conn: sqlite3.Connection, max_retries: int) -> int:
+    """Put failed videos and clips back in line if they have retries left.
+    Returns how many items were requeued."""
+    videos = conn.execute(
+        "UPDATE videos SET status = failed_status, failed_status = NULL, updated_at = ?"
+        " WHERE status = ? AND failed_status IS NOT NULL AND attempts <= ?",
+        (now(), FAILED, max_retries),
+    ).rowcount
+    clips = conn.execute(
+        "UPDATE clips SET status = 'picked' WHERE status = ? AND attempts <= ?",
+        (FAILED, max_retries),
+    ).rowcount
+    return videos + clips
 
 
-def upsert_clip(
+def in_progress_count(conn: sqlite3.Connection, max_retries: int) -> int:
+    """Videos still on their way to `done`, including failed ones that will be retried."""
+    marks = ",".join("?" * len(PIPELINE[:-1]))
+    return conn.execute(
+        f"SELECT COUNT(*) FROM videos WHERE status IN ({marks})"
+        " OR (status = ? AND failed_status IS NOT NULL AND attempts <= ?)",
+        (*PIPELINE[:-1], FAILED, max_retries),
+    ).fetchone()[0]
+
+
+# --- clips -------------------------------------------------------------------
+
+
+def add_clip(
     conn: sqlite3.Connection,
     clip_id: str,
     video_id: str,
@@ -123,17 +231,31 @@ def upsert_clip(
     title: str,
     reason: str,
     score: float,
-    status: str,
-    file_path: str | None = None,
     layout: str = "crop",
 ) -> None:
+    """Insert a picked clip unless it already exists (never resets a rendered clip)."""
     conn.execute(
-        "INSERT INTO clips(id, video_id, start_sec, end_sec, hook_text, title, reason, score,"
-        " status, file_path, created_at, layout) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        " ON CONFLICT(id) DO UPDATE SET start_sec = excluded.start_sec,"
-        " end_sec = excluded.end_sec, hook_text = excluded.hook_text, title = excluded.title,"
-        " reason = excluded.reason, score = excluded.score, status = excluded.status,"
-        " file_path = excluded.file_path, layout = excluded.layout",
-        (clip_id, video_id, start_sec, end_sec, hook_text, title, reason, score, status,
-         file_path, now(), layout),
-    )  # fmt: skip
+        "INSERT OR IGNORE INTO clips(id, video_id, start_sec, end_sec, hook_text, title, reason,"
+        " score, status, layout, attempts, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'picked', ?, 0, ?)",
+        (clip_id, video_id, start_sec, end_sec, hook_text, title, reason, score, layout, now()),
+    )
+
+
+def clip_rows(conn: sqlite3.Connection, video_id: str) -> dict[str, sqlite3.Row]:
+    rows = conn.execute("SELECT * FROM clips WHERE video_id = ? ORDER BY id", (video_id,))
+    return {row["id"]: row for row in rows}
+
+
+def mark_clip_rendered(conn: sqlite3.Connection, clip_id: str, file_path: str, layout: str) -> None:
+    conn.execute(
+        "UPDATE clips SET status = 'rendered', file_path = ?, layout = ? WHERE id = ?",
+        (file_path, layout, clip_id),
+    )
+
+
+def fail_clip(conn: sqlite3.Connection, clip_id: str) -> None:
+    conn.execute(
+        "UPDATE clips SET status = ?, attempts = COALESCE(attempts, 0) + 1 WHERE id = ?",
+        (FAILED, clip_id),
+    )

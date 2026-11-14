@@ -204,7 +204,7 @@ llm_calls(id INTEGER PK, video_id, model, input_tokens, output_tokens, cost_usd,
 | M0 | Setup | `scripts/setup.sh` installs ffmpeg, yt-dlp, whisper.cpp model, venv; `claude -p "hi"` works with subscription login |
 | M1 | One video end-to-end (CLI) | `python -m clipper.run --url <video>` produces 3–5 good clips in `data/clips/` |
 | M2 | Batch + DB + resumable | Pipeline processes 2 videos from config, survives a kill mid-run |
-| M3 | Review UI | Approve/reject + mark posted from phone browser |
+| M3 | Clip inbox (cloud) | Rendered clips appear on the private Cloudflare page; copy caption, download, Done deletes from R2 (see §14) |
 | M4 | Nightly schedule | launchd runs it unattended for 3 nights in a row |
 | M5 | Metrics | Posted URLs + views + campaign status tracked; weekly summary command |
 | M6 | API publishing | YouTube + Instagram auto-post after approvals land |
@@ -243,3 +243,65 @@ Full rules: https://reachclipping.com/TJR (also stored in `config.yaml` → `cam
   Indian viewers. Check audience geography in YouTube/Instagram analytics after the first week.
 - **Sources:** YouTube @TJRTrades (videos + streams) and @TRichesTrades. Streams are long: transcribe only, then
   download/cut just the needed segments if disk is tight.
+
+## 14. Clip inbox (replaces the local review UI in §6.5)
+
+Goal: open a private page from anywhere (phone or laptop, Mac can be off), see new clips, copy caption, download video,
+post manually, submit the link to the campaign, press **Done** and the files are deleted from the cloud.
+
+### Components
+- **Storage:** Cloudflare R2 bucket `clipper-inbox` (S3-compatible, 10 GB free, no egress fees). Not public.
+- **Page + API:** one Cloudflare Worker (TypeScript) with the R2 bucket bound, serving a small single page (plain HTML/JS
+  or tiny React build) and a JSON API. Deployed with `wrangler`.
+- **Auth:** Cloudflare Access (Zero Trust, free) in front of the Worker: allow only Sanyam's email, one-time PIN login.
+  The Mac uploads with R2 S3 API keys, never through the Worker.
+- **Metadata:** stored in R2 next to each clip, no extra database.
+
+### R2 layout
+```
+inbox/<clip_id>.mp4
+inbox/<clip_id>.jpg
+inbox/<clip_id>.json   # id, campaign_id, campaign_submit_url, title, caption (with required hashtags),
+                       # hook_text, duration_sec, score, created_at
+done/<clip_id>.json    # same metadata + posted_urls {youtube_shorts, instagram_reels}, done_at
+```
+
+### Mac side (pipeline stage `upload`, runs after `render`)
+- boto3 against the R2 endpoint; creds from macOS Keychain or a gitignored `.env` (never committed).
+- Upload mp4, jpg, json; set clip status `uploaded`. Local mp4 may be deleted after a successful upload
+  (config `delete_local_after_upload: true`) to save disk.
+- `sync_done` step at the start of every run: list `done/`, write posted URLs + done_at into SQLite `posts`,
+  set clip status `posted`, then delete the `done/` object.
+
+### Worker API
+| Method | Path | Does |
+|---|---|---|
+| GET | `/` | the page |
+| GET | `/api/clips` | list `inbox/*.json`, newest first |
+| GET | `/api/clips/:id/video` | stream mp4 from R2 (supports Range for in-page playback); `?download=1` sets Content-Disposition |
+| GET | `/api/clips/:id/thumb` | jpg |
+| POST | `/api/clips/:id/done` | body `{posted_urls}`; write `done/<id>.json`, delete `inbox/<id>.*` |
+| POST | `/api/clips/:id/reject` | write `done/<id>.json` with `rejected: true`, delete `inbox/<id>.*` |
+
+### Page (mobile-first)
+Card per clip: video player (thumbnail as poster), title, hook, **Copy caption** button (shows "Copied"), **Download**,
+inputs for YouTube / Instagram post URLs, **Open campaign** link (`campaign_submit_url`), **Done** and **Reject**.
+Show a 30-minute reminder after the first URL is pasted ("submit to the campaign before HH:MM").
+Done/Reject ask for a confirm tap (in-page, not `window.confirm`).
+
+### Config additions
+```yaml
+inbox:
+  enabled: true
+  r2_endpoint: https://<account_id>.r2.cloudflarestorage.com
+  bucket: clipper-inbox
+  page_url: https://clipper.<subdomain>.workers.dev
+  delete_local_after_upload: true
+```
+Campaign entries gain `submit_url` (the campaign page on Content Rewards).
+
+### Setup steps for Sanyam (one-time, ~20 min)
+1. Create a free Cloudflare account; enable R2 (needs a card on file, free tier only).
+2. Create bucket `clipper-inbox`; create an R2 API token (Object Read & Write, this bucket only).
+3. `npm i -g wrangler && wrangler login`; Claude Code deploys the Worker.
+4. Zero Trust → Access → add an application for the Worker URL, policy: email equals Sanyam's email.

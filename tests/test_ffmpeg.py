@@ -17,6 +17,13 @@ def test_crop_layout_filter():
     assert "sendcmd" not in video_filter(R, CROP, None, "captions.ass")
 
 
+def test_fonts_dir_is_passed_to_libass():
+    vf = video_filter(R, CROP, None, "captions.ass", "fonts")
+    assert vf.endswith(",setsar=1,ass=captions.ass:fontsdir=fonts[v]")
+    cmd = render_cmd(Path("in.mp4"), Path("o.mp4"), CROP, R, "libx264", None, "c.ass", "fonts")
+    assert cmd[cmd.index("-filter_complex") + 1].endswith("ass=c.ass:fontsdir=fonts[v]")
+
+
 def test_fit_layout_filter_keeps_full_frame_over_blurred_fill():
     vf = video_filter(R, None, None, "captions.ass")
     bg, fg, out = vf.split(";")[1:]

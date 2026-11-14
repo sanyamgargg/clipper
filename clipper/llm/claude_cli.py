@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from clipper.config import Config
+from clipper.proc import run as tracked_run
 
 log = logging.getLogger(__name__)
 
@@ -57,10 +58,7 @@ def run_claude(cfg: Config, prompt: str, cwd: Path) -> LLMResult:
     # Never pass an API key down: with one set, claude bills the API, not the subscription.
     env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
     try:
-        proc = subprocess.run(
-            cmd, input=prompt, capture_output=True, text=True, cwd=cwd, env=env, check=False,
-            timeout=cfg.claude.timeout_sec,
-        )  # fmt: skip
+        proc = tracked_run(cmd, input=prompt, cwd=cwd, env=env, timeout=cfg.claude.timeout_sec)
     except subprocess.TimeoutExpired as exc:
         result = LLMResult(text="", exit_code=124, model=model)
         raise ClaudeCLIError(

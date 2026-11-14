@@ -7,11 +7,12 @@ import subprocess
 from pathlib import Path
 
 from clipper.config import Render
+from clipper.proc import run as tracked_run
 from clipper.render.facetrack import Crop
 
 
 def run(cmd: list[str], cwd: Path | None = None) -> None:
-    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, check=False)
+    proc = tracked_run(cmd, cwd=cwd)
     if proc.returncode != 0:
         raise RuntimeError(f"{cmd[0]} failed ({proc.returncode}): {proc.stderr.strip()[-800:]}")
 
@@ -37,12 +38,19 @@ def encoder_args(encoder: str, bitrate: str) -> list[str]:
     return args
 
 
-def video_filter(r: Render, crop: Crop | None, cmd_file: str | None, ass_file: str) -> str:
+def video_filter(
+    r: Render,
+    crop: Crop | None,
+    cmd_file: str | None,
+    ass_file: str,
+    fonts_dir: str | None = None,
+) -> str:
     """filter_complex graph from [0:v] to [v].
 
     crop layout (`crop` given): crop window, moved by sendcmd, scaled to the output size.
     fit layout (`crop` is None): the whole frame scaled to fit, centred over a blurred,
-    slightly darkened copy of itself that fills the output."""
+    slightly darkened copy of itself that fills the output.
+    `fonts_dir`: fonts libass loads before falling back to system fonts."""
     if crop is None:
         bw, bh = r.width // 4, r.height // 4  # blur at quarter size: cheap, and softer
         chain = (
@@ -60,7 +68,8 @@ def video_filter(r: Render, crop: Crop | None, cmd_file: str | None, ass_file: s
             f"[0:v]fps={r.fps},{send}crop={crop.w}:{crop.h}:{x0}:{crop.y},"
             f"scale={r.width}:{r.height}:flags=lanczos"
         )
-    return f"{chain},setsar=1,ass={ass_file}[v]"
+    fonts = f":fontsdir={fonts_dir}" if fonts_dir else ""
+    return f"{chain},setsar=1,ass={ass_file}{fonts}[v]"
 
 
 def render_cmd(
@@ -71,13 +80,14 @@ def render_cmd(
     encoder: str,
     cmd_file: str | None,
     ass_file: str,
+    fonts_dir: str | None = None,
 ) -> list[str]:
     """Lay out the video (see video_filter), burn captions, normalize loudness.
-    `cmd_file` and `ass_file` are bare file names: run ffmpeg with cwd = their directory,
-    which avoids filter-path escaping."""
+    `cmd_file`, `ass_file` and `fonts_dir` are names relative to ffmpeg's cwd (the work
+    directory), which avoids filter-path escaping."""
     return [
         "ffmpeg", "-y", "-v", "error", "-i", str(src),
-        "-filter_complex", video_filter(r, crop, cmd_file, ass_file),
+        "-filter_complex", video_filter(r, crop, cmd_file, ass_file, fonts_dir),
         "-map", "[v]", "-map", "0:a:0",
         "-af", f"loudnorm=I={r.loudness_lufs:g}:TP=-1.5:LRA=11",
         *encoder_args(encoder, r.video_bitrate),

@@ -6,8 +6,10 @@ from clipper.render.facetrack import (
     Crop,
     Face,
     crop_path,
+    face_top,
     sendcmd_script,
     smooth_path,
+    to_output_y,
     track_primary,
 )
 
@@ -70,6 +72,24 @@ def test_crop_path_interpolates_and_clamps():
 def test_crop_path_narrow_source_keeps_full_width():
     crop = crop_path([0.5], 1080, 1920, 1080, 1920, n_frames=3, fps=30)
     assert (crop.w, crop.h, crop.y, crop.xs) == (1080, 1920, 0, [0, 0, 0])
+
+
+def test_face_top_is_the_highest_top_of_the_tracked_face_while_the_hook_shows():
+    me = [Face(0.3, 0.1, 0.9, top=0.22), Face(0.3, 0.1, 0.9, top=0.18)]
+    other = Face(0.8, 0.3, 0.9, top=0.05)  # someone else, higher in frame: ignored
+    frames = [[me[0], other], [], [me[1], other], [Face(0.3, 0.1, 0.9, top=0.01)]]
+    track = [0.3, None, 0.3, 0.3]
+    assert face_top(frames, track, n=3) == 0.18  # the 4th frame is after the hook
+    assert face_top([[], []], [None, None], n=2) is None
+
+
+def test_to_output_y_crop_and_fit():
+    crop = Crop(w=606, h=1076, y=2, xs=[0])
+    assert to_output_y(0.0, 1920, 1080, 1080, 1920, crop) == pytest.approx(-2 * 1920 / 1076)
+    assert to_output_y(0.5, 1920, 1080, 1080, 1920, crop) == pytest.approx(538 * 1920 / 1076)
+    # fit: 1920x1080 scaled to 1080x607.5, centred: band from 656.25 to 1263.75
+    assert to_output_y(0.0, 1920, 1080, 1080, 1920, None) == pytest.approx(656.25)
+    assert to_output_y(1.0, 1920, 1080, 1080, 1920, None) == pytest.approx(1263.75)
 
 
 def test_sendcmd_only_on_change():

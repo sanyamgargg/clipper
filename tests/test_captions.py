@@ -1,16 +1,37 @@
 import itertools
 
+import pytest
+
+from clipper.config import REPO_ROOT
 from clipper.render.captions import (
-    HIGHLIGHT,
-    WHITE,
+    HOOK_FACE_GAP,
+    YELLOW,
+    CaptionStyle,
+    FontMetrics,
+    apply_fixes,
     ass_time,
     build_ass,
     caption_events,
+    caption_words,
+    chunk_fit,
     chunk_words,
     display,
-    fit_hook,
+    hook_markup,
+    is_caps_word,
+    layout_hook,
 )
 from clipper.timing import Word
+
+FONTS = REPO_ROOT / "assets" / "fonts"
+# synthetic font: every glyph 0.5 em wide, cell = 1 em, caps 0.7 em
+SIMPLE = FontMetrics(upm=1000, cell=1000, ascent=800, cap=700, descent=200, default_advance=500)
+
+
+@pytest.fixture(scope="module")
+def montserrat() -> FontMetrics:
+    metrics = FontMetrics.find(FONTS, "Montserrat Black")
+    assert metrics is not None, "bundled font missing from assets/fonts"
+    return metrics
 
 
 def make_words(text: str, dur: float = 0.2, gap: float = 0.05) -> list[Word]:
@@ -25,6 +46,38 @@ def texts(chunks: list[list[Word]]) -> list[str]:
     return [" ".join(w.w for w in c) for c in chunks]
 
 
+# --- caption words: fillers and fixes ---------------------------------------------
+
+
+def test_fillers_are_dropped_from_captions_only():
+    words = make_words("So um, I uh... think Uhm. umbrella uhh")
+    assert [w.w for w in caption_words(words)] == ["So", "I", "think", "umbrella"]
+    assert len(words) == 8  # the transcript itself is untouched
+
+
+def test_fixes_replace_phrases_case_and_punctuation_insensitively():
+    words = make_words("met In Santos? and incentos, in Vegas")
+    fixed = apply_fixes(words, {"in santos": "Insentos", "incentos": "Insentos"})
+    assert [w.w for w in fixed] == ["met", "Insentos?", "and", "Insentos,", "in", "Vegas"]
+    phrase = fixed[1]
+    assert (phrase.s, phrase.e) == (words[1].s, words[2].e)  # spans both words
+
+
+def test_fixes_prefer_the_longest_match():
+    words = make_words("t j r said tj")
+    fixed = apply_fixes(words, {"tj": "TJ", "t j r": "TJR"})
+    assert [w.w for w in fixed] == ["TJR", "said", "TJ"]
+
+
+def test_fixes_without_rules_return_the_words():
+    words = make_words("a b")
+    assert apply_fixes(words, {}) == words
+    assert apply_fixes(words, {"": "x"}) == words
+
+
+# --- chunks ------------------------------------------------------------------------
+
+
 def test_display_cleans_words():
     assert display("Hello,") == "HELLO"
     assert display("what?") == "WHAT?"
@@ -32,22 +85,19 @@ def test_display_cleans_words():
     assert display("{\\b1}x") == "B1X"
 
 
-def test_chunks_respect_max_words():
-    assert texts(chunk_words(make_words("a b c d e f g h i j"))) == ["a b c d", "e f g h", "i j"]
+def test_chunks_respect_max_three_words():
+    assert texts(chunk_words(make_words("a b c d e f g"))) == ["a b c", "d e f", "g"]
 
 
-def test_chunks_respect_max_chars():
-    chunks = chunk_words(make_words("extraordinary circumstances happen so it goes"))
-    assert texts(chunks) == ["extraordinary", "circumstances", "happen so it goes"]
-    for c in chunks[2:]:
-        assert len(" ".join(display(w.w) for w in c)) <= 18
+def test_chunks_respect_max_14_chars():
+    chunks = chunk_words(make_words("everything happens fast now"))
+    assert texts(chunks) == ["everything", "happens fast", "now"]
+    for c in chunks:
+        assert len(" ".join(display(w.w) for w in c)) <= 14
 
 
-def test_chunks_break_at_sentence_end():
+def test_chunks_break_at_sentence_end_and_pause():
     assert texts(chunk_words(make_words("Hello there. Next one"))) == ["Hello there.", "Next one"]
-
-
-def test_chunks_break_at_pause():
     words = [Word("a", 0.0, 0.2), Word("b", 1.0, 1.2), Word("c", 1.25, 1.4)]
     assert texts(chunk_words(words)) == ["a", "b c"]
 
@@ -62,20 +112,38 @@ def test_chunks_skip_words_with_nothing_to_show():
     assert texts(chunk_words(words)) == ["a b"]
 
 
-def test_caption_events_highlight_each_word_in_turn():
-    hl = f"{{\\c{HIGHLIGHT}}}%s{{\\c{WHITE}}}"
+# --- caption events -----------------------------------------------------------------
+
+
+def test_events_highlight_each_word_and_pop_only_when_the_chunk_appears():
     chunks = [[Word("a", 0.0, 0.2), Word("b", 0.25, 0.45)], [Word("c.", 0.5, 0.7)]]
+    pop = "\\fscx85\\fscy85\\t(0,80,\\fscx100\\fscy100)"
+    pop_active = "\\fscx95\\fscy95\\t(0,80,\\fscx112\\fscy112)"
+    still = "\\fscx100\\fscy100"
+    still_active = "\\fscx112\\fscy112"
     assert caption_events(chunks) == [
-        (0.0, 0.25, f"{hl % 'A'} B"),
-        (0.25, 0.5, f"A {hl % 'B'}"),  # lingers only until the next chunk starts
-        (0.5, 0.7 + 0.2, hl % "C"),
+        (0.0, 0.25, f"{{{pop}}}{{\\c{YELLOW}{pop_active}}}A{{\\c&HFFFFFF&{pop}}} B"),
+        (0.25, 0.5, f"{{{still}}}A {{\\c{YELLOW}{still_active}}}B{{\\c&HFFFFFF&{still}}}"),
+        (0.5, 0.7 + 0.2, f"{{{pop}}}{{\\c{YELLOW}{pop_active}}}C{{\\c&HFFFFFF&{pop}}}"),
     ]
 
 
-def test_caption_events_never_overlap():
+def test_events_never_overlap():
     events = caption_events(chunk_words(make_words("one two three four five six. Seven eight")))
     for (_, end, _), (start, _, _) in itertools.pairwise(events):
         assert end <= start + 1e-9
+
+
+def test_chunk_fit_shrinks_only_chunks_that_would_overflow(montserrat):
+    normal = make_words("I just want")
+    long = make_words("ENTREPRENEURSHIP.")
+    assert chunk_fit(normal, montserrat, 90, 1000) == 1.0
+    fit = chunk_fit(long, montserrat, 90, 1000)
+    assert 0.8 < fit < 1.0
+    width = montserrat.width("ENTREPRENEURSHIP", 90, 1) * 1.12 * fit
+    assert width == pytest.approx(1000, abs=1)
+    event = caption_events([long], montserrat, 90, 1000)[0][2]
+    assert f"\\fscx{round(100 * fit)}" in event and "\\fscx100" not in event
 
 
 def test_ass_time():
@@ -84,51 +152,135 @@ def test_ass_time():
     assert ass_time(3723.5) == "1:02:03.50"
 
 
-ASS_ARGS = {
+# --- font metrics -------------------------------------------------------------------
+
+
+def test_bundled_font_is_found_by_any_of_its_names(montserrat):
+    assert FontMetrics.find(FONTS, "montserrat black") == montserrat
+    assert FontMetrics.find(FONTS, "Montserrat-Black") == montserrat  # PostScript name
+    assert FontMetrics.find(FONTS, "Comic Sans") is None
+    assert FontMetrics.find(FONTS / "missing", "Montserrat Black") is None
+
+
+def test_ass_size_converts_em_pixels_to_libass_cell_size(montserrat):
+    # libass makes winAscent + winDescent (1562 units) equal Fontsize
+    assert (montserrat.upm, montserrat.cell) == (1000, 1562)
+    assert montserrat.ass_size(90) == 141
+    assert SIMPLE.ass_size(90) == 90
+    assert SIMPLE.width("abcd", 100) == 200
+    assert SIMPLE.width("abcd", 100, spacing=1) == 204
+
+
+# --- hook ---------------------------------------------------------------------------
+
+H = 1920
+HOOK = {
     "width": 1080,
-    "height": 1920,
-    "font": "Arial",
-    "font_size": 84,
-    "y_frac": 0.66,
-    "hook_sec": 2.5,
-    "hook_size": 150,
-    "hook_y_frac": 0.175,
+    "height": H,
+    "max_px": 150,
+    "min_px": 90,
+    "fallback_top_frac": 0.09,
+    "top_limit_frac": 0.05,
 }
 
 
-def test_fit_hook_short_text_is_one_line_at_max_size():
-    assert fit_hook("Red flag.", 960, 150) == (["Red flag."], 150)
+def test_hook_without_face_starts_at_fallback_and_is_max_size():
+    hook = layout_hook("Red flag", SIMPLE, "outline", face_top=None, **HOOK)
+    assert (hook.lines, hook.px) == (["Red flag"], 150)  # 8 chars x 0.5 em x 150 = 600 px
+    assert hook.top == round(0.09 * H)
 
 
-def test_fit_hook_splits_into_two_balanced_lines():
-    lines, size = fit_hook("I moved and noticed something", 960, 150)
-    assert lines == ["I moved and", "noticed something"]
-    assert size == int(960 / (0.6 * 17)) == 94
+def test_hook_splits_long_text_into_two_balanced_lines_that_fit_the_width():
+    hook = layout_hook("I moved and noticed something", SIMPLE, "outline", face_top=None, **HOOK)
+    assert hook.lines == ["I moved and", "noticed something"]
+    usable = 1080 - 2 * 40
+    assert 17 * 0.5 * hook.px + 2 * 0.10 * hook.px <= usable  # widest line + outline
+    assert hook.px == int(usable / (17 * 0.5 + 0.2)) == 114
 
 
-def test_fit_hook_never_more_than_two_lines_and_has_a_floor():
-    lines, size = fit_hook("word " * 30, 960, 150)
-    assert len(lines) == 2 and size == 56
-    assert fit_hook("", 960, 150) == ([], 150)
+def test_hook_never_exceeds_two_lines():
+    hook = layout_hook("word " * 30, SIMPLE, "outline", face_top=None, **HOOK)
+    assert len(hook.lines) == 2
 
 
-def test_build_ass_has_hook_and_positioned_captions():
-    ass = build_ass(make_words("Hello there."), "Big {hook}\ntext", **ASS_ARGS)
-    assert "PlayResX: 1080" in ass and "Style: Caption,Arial,84," in ass
-    # white text, black outline, sized to fit; centred at 17.5% of the height
-    assert "Style: Hook,Arial,150,&H00FFFFFF,&H00FFFFFF,&H00000000," in ass
+@pytest.mark.parametrize("style", ["outline", "box"])
+def test_hook_sits_above_the_face(style):
+    face_top = 900
+    hook = layout_hook("Why do they need YOU", SIMPLE, style, face_top=face_top, **HOOK)
+    assert hook.bottom == pytest.approx(face_top - HOOK_FACE_GAP * H, abs=1)
+    assert hook.top >= 0.05 * H
+
+
+def test_hook_shrinks_to_fit_above_a_high_face_but_not_below_min():
+    roomy = layout_hook("I just want it more", SIMPLE, "box", face_top=1000, **HOOK)
+    tight = layout_hook("I just want it more", SIMPLE, "box", face_top=420, **HOOK)
+    assert tight.px < roomy.px
+    assert tight.px >= 90
+    assert tight.bottom <= 420 - HOOK_FACE_GAP * H + 1
+    cramped = layout_hook("I just want it more", SIMPLE, "box", face_top=150, **HOOK)
+    assert cramped.px == 90  # floor: rather overlap the head than shrink further
+    assert cramped.top == round(0.05 * H)
+
+
+def test_box_hook_reserves_its_padding():
+    outline = layout_hook("Red flag", SIMPLE, "outline", face_top=None, **HOOK)
+    box = layout_hook("Red flag", SIMPLE, "box", face_top=None, **HOOK)
+    assert box.bottom - box.top > outline.bottom - outline.top
+
+
+def test_caps_words_are_yellow_in_outline_style_only():
+    assert [is_caps_word(w) for w in ["YOU", "NQ", "I", "$1M", "PnL", "MORE?"]] == [
+        True, True, False, False, False, True,
+    ]  # fmt: skip
+    assert hook_markup(["Why do they", "need YOU?"], "outline") == (
+        f"Why do they\\Nneed {{\\c{YELLOW}}}YOU?{{\\c&HFFFFFF&}}"
+    )
+    assert hook_markup(["Why do they", "need YOU?"], "box") == "Why do they\\Nneed YOU?"
+
+
+# --- full ASS file --------------------------------------------------------------------
+
+
+def test_build_ass_caption_style(montserrat):
+    ass = build_ass(make_words("Hello there."), "", CaptionStyle(), montserrat)
+    assert "PlayResX: 1080" in ass
+    # Montserrat Black, 90 px em = 141; outline 10, shadow 3 at 50% black, spacing 1
     assert (
-        "Dialogue: 0,0:00:00.00,0:00:02.50,Hook,,0,0,0,,"
-        "{\\q2\\pos(540,336)\\fad(0,200)}Big hook\\Ntext\n"
+        "Style: Caption,Montserrat Black,141,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,"
+        "-1,0,0,0,100,100,1,0,1,10,3,5,40,40,0,1"
     ) in ass
     assert ass.count("Dialogue: 1,") == 2
-    assert "{\\pos(540,1267)}" in ass
+    assert "{\\an5\\pos(540,1267)}" in ass
+    assert "Dialogue: 0," not in ass  # no hook
 
 
-def test_build_ass_long_hook_wraps_to_two_lines():
-    ass = build_ass([], "Rich people asking YOU for help? Red flag.", **ASS_ARGS)
-    assert "}Rich people asking YOU\\Nfor help? Red flag.\n" in ass
+def test_build_ass_outline_hook(montserrat):
+    ass = build_ass([], "Why do they need YOU", CaptionStyle(hook_style="outline"), montserrat)
+    style = next(line for line in ass.splitlines() if line.startswith("Style: Hook,"))
+    assert ",&H00FFFFFF,&H00FFFFFF,&H00000000," in style  # white text, black outline
+    assert ",-1,0,0,0,100,100,0,0,1," in style  # bold, BorderStyle 1
+    dialogue = next(line for line in ass.splitlines() if line.startswith("Dialogue: 0,"))
+    assert dialogue.startswith("Dialogue: 0,0:00:00.00,0:00:03.00,Hook,")  # shown 3 s
+    assert "\\an5\\pos(540," in dialogue and "\\q2" in dialogue
+    assert "\\fscx85\\fscy85\\t(0,120,\\fscx100\\fscy100)\\fad(0,200)" in dialogue
+    assert f"{{\\c{YELLOW}}}YOU" in dialogue
 
 
-def test_build_ass_without_hook():
-    assert "Dialogue" not in build_ass([], "", **ASS_ARGS)
+def test_build_ass_box_hook(montserrat):
+    ass = build_ass([], "Why do they need YOU", CaptionStyle(hook_style="box"), montserrat)
+    style = next(line for line in ass.splitlines() if line.startswith("Style: Hook,"))
+    assert ",&H00000000,&H00000000,&H00FFFFFF,&H00FFFFFF," in style  # black on white box
+    assert ",0,0,3," in style  # BorderStyle 3: opaque box
+    assert YELLOW not in ass
+
+
+def test_build_ass_places_hook_above_the_face(montserrat):
+    style = CaptionStyle()
+    no_face = build_ass([], "Red flag", style, montserrat)
+    face = build_ass([], "Red flag", style, montserrat, face_top=1000)
+
+    def hook_y(ass: str) -> int:
+        dialogue = next(line for line in ass.splitlines() if line.startswith("Dialogue: 0,"))
+        return int(dialogue.split("\\pos(540,", 1)[1].split(")", 1)[0])
+
+    assert hook_y(no_face) < hook_y(face) < 1000

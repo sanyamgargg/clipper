@@ -6,10 +6,14 @@ machine:
   min_free_gb: 5                      # stop before downloading/rendering if less disk is free
 
 render:
-  caption_font: Arial                 # bold sans font installed on this machine
+  caption_font: Montserrat Black      # bundled in assets/fonts (OFL)
+  caption_font_size: 90               # em height in px at 1080 wide
+  hook_style: outline                 # outline (white, black outline, CAPS words yellow) | box
 
 pipeline:
   videos_per_night: 2
+  max_source_minutes: 120             # longer videos are skipped (status skipped_too_long)
+  max_retries: 3                      # failed videos/clips are retried on this many later runs
   candidates_per_video: 5
   clip_min_sec: 20
   clip_max_sec: 45
@@ -31,4 +35,6 @@ campaigns:
       max_sec: 60
       required_caption_text: ""
       notes: "No watermarks."
+    vocabulary: []                    # names/jargon primed into whisper, e.g. [TJR, PnL]
+    caption_fixes: {}                 # misheard -> correct in captions, e.g. {in santos: Insentos}
     active: false

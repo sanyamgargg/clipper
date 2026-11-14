@@ -27,7 +27,7 @@ Return ONLY valid JSON, no prose, no code fences:
     {
       "start": "mm:ss",
       "end": "mm:ss",
-      "hook_text": "max 5 words and 28 characters, shown very large on screen in the first 2 seconds",
+      "hook_text": "max 5 words and 28 characters, shown very large for the first 3 seconds; write the 1-2 key words in ALL CAPS (they are highlighted)",
       "title": "max 70 chars, curiosity-driven, no clickbait lies",
       "reason": "one sentence: why this will hold attention",
       "score": 0.0

@@ -28,6 +28,7 @@ class Face:
     cx: float  # centre x, 0..1 of frame width
     size: float  # box width, 0..1 of frame width
     score: float
+    top: float = 0.0  # box top, 0..1 of frame height
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,7 @@ def detect_faces(video: Path, model: Path, src_w: int, src_h: int) -> list[list[
                         cx=(d.bounding_box.origin_x + d.bounding_box.width / 2) / w,
                         size=d.bounding_box.width / w,
                         score=d.categories[0].score,
+                        top=d.bounding_box.origin_y / h,
                     )
                     for d in result.detections
                 ]
@@ -184,3 +186,25 @@ def sendcmd_script(crop: Crop, fps: float) -> str:
             lines.append(f"{n / fps:.4f} crop x {x};")
             prev = x
     return "\n".join(lines) + "\n"
+
+
+def face_top(frames: list[list[Face]], track: list[float | None], n: int) -> float | None:
+    """Highest top edge (0..1 of frame height) of the tracked face over the first `n`
+    sampled frames, i.e. while the hook is on screen. None if no face was tracked."""
+    tops = [
+        min(faces, key=lambda f: abs(f.cx - x)).top
+        for faces, x in zip(frames[:n], track[:n], strict=False)
+        if faces and x is not None
+    ]
+    return min(tops) if tops else None
+
+
+def to_output_y(
+    top: float, src_w: int, src_h: int, out_w: int, out_h: int, crop: Crop | None
+) -> float:
+    """A source y (0..1 of height) in output pixels, for the crop layout (`crop`) or the
+    fit layout (`crop` is None: frame scaled to fit and centred)."""
+    if crop is None:
+        scale = min(out_w / src_w, out_h / src_h)
+        return (out_h - src_h * scale) / 2 + top * src_h * scale
+    return (top * src_h - crop.y) * out_h / crop.h

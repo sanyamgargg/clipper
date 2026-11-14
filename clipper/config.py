@@ -21,6 +21,8 @@ class Machine(BaseModel):
 
 class Pipeline(BaseModel):
     videos_per_night: int = 2
+    max_source_minutes: float = 120  # longer videos are skipped (status skipped_too_long)
+    max_retries: int = 3  # a failed video/clip is retried on up to this many later runs
     candidates_per_video: int = 5
     clip_min_sec: float = 20
     clip_max_sec: float = 45
@@ -32,13 +34,17 @@ class Render(BaseModel):
     fps: int = 30
     video_bitrate: str = "9M"
     loudness_lufs: float = -14
-    caption_font: str = "Arial"  # must be installed on this machine
-    caption_font_size: int = 84
+    fonts_dir: Path = Path("assets/fonts")  # bundled fonts, handed to libass
+    caption_font: str = "Montserrat Black"  # a font in fonts_dir (else a system font)
+    caption_font_size: int = 90  # em height in px
     caption_y_frac: float = 0.66  # caption centre, as a fraction of frame height
     caption_y_frac_fit: float = 0.72  # fit layout: captions sit below the video band
-    hook_sec: float = 2.5
-    hook_font_size: int = 150  # largest size; long hooks shrink to stay on 2 lines
-    hook_y_frac: float = 0.175  # hook centre, as a fraction of frame height
+    hook_style: Literal["box", "outline"] = "outline"
+    hook_sec: float = 3.0
+    hook_font_size: int = 150  # largest em height in px; shrinks to fit width / face
+    hook_min_font_size: int = 90  # never smaller, even if it then overlaps the head
+    hook_fallback_top_frac: float = 0.09  # hook top when no face is found
+    hook_top_limit_frac: float = 0.05  # hook never starts higher than this
     default_layout: Literal["crop", "fit"] = "crop"  # per clip, can be changed later
     face_model: str = "blaze_face_short_range"  # data/models/<name>.tflite
 
@@ -72,6 +78,8 @@ class Campaign(BaseModel):
     platforms: list[str] = Field(default_factory=list)
     sources: list[str] = Field(default_factory=list)
     rules: Rules = Field(default_factory=Rules)
+    vocabulary: list[str] = Field(default_factory=list)  # whisper prompt: names, jargon
+    caption_fixes: dict[str, str] = Field(default_factory=dict)  # misheard -> right, captions
     active: bool = True
 
 
@@ -86,6 +94,11 @@ class Config(BaseModel):
     def data_dir(self) -> Path:
         d = self.machine.data_dir
         return d if d.is_absolute() else (REPO_ROOT / d).resolve()
+
+    @property
+    def fonts_dir(self) -> Path:
+        d = self.render.fonts_dir
+        return d if d.is_absolute() else REPO_ROOT / d
 
     def dir(self, name: str) -> Path:
         p = self.data_dir / name

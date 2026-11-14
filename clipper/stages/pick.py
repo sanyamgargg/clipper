@@ -55,7 +55,9 @@ def load_clips(path: Path) -> list[Clip]:
 
 
 def save_clips(clips: list[Clip], path: Path) -> None:
-    path.write_text(json.dumps([asdict(c) for c in clips], indent=2))
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps([asdict(c) for c in clips], indent=2))
+    tmp.replace(path)  # atomic: a crash never leaves a half-written picks file
 
 
 def campaign_rules_text(campaign: Campaign) -> str:
@@ -168,7 +170,9 @@ def pick(
     clips_path = cfg.dir("transcripts") / f"{video_id}.clips.json"
     if clips_path.exists():
         log.info("picks already present: %s", clips_path.name)
-        return load_clips(clips_path)
+        clips = load_clips(clips_path)
+        _add_rows(conn, clips)  # in case a crash came between the file and the rows
+        return clips
 
     text = _ask(cfg, conn, video_id, build_prompt(cfg, campaign, compact_path.read_text()))
     try:
@@ -191,8 +195,12 @@ def pick(
     for c in clips:
         c.layout = cfg.render.default_layout
     save_clips(clips, clips_path)
-    for c in clips:
-        db.upsert_clip(conn, c.id, c.video_id, c.start_sec, c.end_sec, c.hook_text, c.title,
-                       c.reason, c.score, status="picked", layout=c.layout)  # fmt: skip
+    _add_rows(conn, clips)
     log.info("picked %d clips", len(clips))
     return clips
+
+
+def _add_rows(conn: sqlite3.Connection, clips: list[Clip]) -> None:
+    for c in clips:
+        db.add_clip(conn, c.id, c.video_id, c.start_sec, c.end_sec, c.hook_text, c.title,
+                    c.reason, c.score, c.layout)  # fmt: skip
