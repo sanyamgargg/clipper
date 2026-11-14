@@ -1,0 +1,30 @@
+machine:
+  whisper_backend: whisper_cpp        # whisper_cpp | faster_whisper
+  whisper_model: large-v3-turbo-q5_0
+  video_encoder: h264_videotoolbox    # h264_videotoolbox | h264_qsv | libx264
+  data_dir: ./data
+
+pipeline:
+  videos_per_night: 2
+  candidates_per_video: 5
+  clip_min_sec: 20
+  clip_max_sec: 45
+
+claude:
+  model: sonnet          # sonnet | haiku
+  max_turns: 3
+  timeout_sec: 300
+
+campaigns:
+  - id: example-podcast
+    name: "Example Podcast"
+    rate_per_1k: 1.0
+    platforms: [youtube_shorts, instagram_reels]
+    sources:
+      - https://www.youtube.com/@example/videos
+    rules:
+      min_sec: 15
+      max_sec: 60
+      required_caption_text: ""
+      notes: "No watermarks."
+    active: false
