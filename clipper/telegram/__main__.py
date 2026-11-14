@@ -13,6 +13,7 @@ import logging
 import signal
 import sys
 import time
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from clipper import db
@@ -20,6 +21,7 @@ from clipper.config import REPO_ROOT, load_config
 from clipper.proc import AlreadyRunning, run_lock
 from clipper.telegram.api import BotAPI, TelegramError, get_token
 from clipper.telegram.inbox import (
+    BOT_LOCK,
     HELP,
     OFFSET_KEY,
     Inbox,
@@ -32,7 +34,6 @@ from clipper.telegram.inbox import (
 
 log = logging.getLogger("clipper.telegram")
 
-BOT_LOCK = "telegram-bot.lock"
 LONG_POLL_SEC = 50
 
 
@@ -95,10 +96,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     cfg = load_config(args.config)
+    # the bot runs around the clock: rotate its log; echo to the terminal only if there is one
+    handlers: list[logging.Handler] = [
+        RotatingFileHandler(cfg.dir("logs") / "telegram.log", maxBytes=5_000_000, backupCount=3)
+    ]
+    if sys.stderr.isatty():
+        handlers.append(logging.StreamHandler())
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        handlers=[logging.StreamHandler(), logging.FileHandler(cfg.dir("logs") / "telegram.log")],
+        handlers=handlers,
     )
     signal.signal(signal.SIGTERM, _on_sigterm)
     try:

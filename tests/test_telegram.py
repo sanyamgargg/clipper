@@ -283,6 +283,7 @@ def test_reply_to_a_clip_records_its_links_by_platform(ix):
         ("instagram_reels", "https://www.instagram.com/reel/b/"),
     ]
     assert "Saved 2 link(s)" in ix.api.last("sendMessage")["text"]
+    assert [p["duration_sec"] for p in posts] == [30.0, 30.0]  # clip length, for views by length
     assert status(ix, "v1_01") == "delivered"  # links alone do not mark it done
     send_text(ix, "https://youtube.com/shorts/a", reply_to=101)
     assert len(db.posts_for(ix.conn, "v1_01")) == 2

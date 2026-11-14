@@ -15,8 +15,11 @@ pipeline:
   max_source_minutes: 120             # longer videos are skipped (status skipped_too_long)
   max_retries: 3                      # failed videos/clips are retried on this many later runs
   candidates_per_video: 5
-  clip_min_sec: 20
-  clip_max_sec: 45
+  clip_min_sec: 18
+  clip_max_sec: 35
+  clip_story_max_sec: 45              # only when Claude marks the clip "story": true
+  clip_target_min_sec: 20             # the prompt asks Claude to prefer 20-30 s
+  clip_target_max_sec: 30
 
 telegram:                             # clip inbox (PLAN.md §14); token in Keychain, never here
   enabled: false
@@ -27,6 +30,7 @@ telegram:                             # clip inbox (PLAN.md §14); token in Keyc
   delete_after_done_hours: 24         # then delete the video message from the chat
 
 claude:
+  keychain_service: clipper-claude-oauth  # `claude setup-token` token; run_nightly.sh exports it
   model: sonnet          # sonnet | haiku
   max_turns: 3
   timeout_sec: 300

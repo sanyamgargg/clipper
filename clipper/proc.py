@@ -88,6 +88,12 @@ def run(
     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
+def lock_held(data_dir: Path, name: str = LOCK_NAME) -> bool:
+    """True if a live process holds data/<name>."""
+    pid = _read_pid(data_dir / name)
+    return pid is not None and _alive(pid)
+
+
 @contextmanager
 def run_lock(data_dir: Path, name: str = LOCK_NAME) -> Iterator[None]:
     """Hold data/<name> (default clipper.lock) while running. Raises AlreadyRunning if

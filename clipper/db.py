@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS clips(
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS posts(
     id INTEGER PRIMARY KEY, clip_id TEXT, platform TEXT, url TEXT, posted_at TEXT, views INT,
-    views_checked_at TEXT, submitted_to_campaign INT, campaign_status TEXT, earnings REAL);
+    views_checked_at TEXT, submitted_to_campaign INT, campaign_status TEXT, earnings REAL,
+    duration_sec REAL);
 CREATE TABLE IF NOT EXISTS runs(
     id INTEGER PRIMARY KEY, stage TEXT, item_id TEXT, started_at TEXT, ended_at TEXT,
     ok INT, error TEXT);
@@ -59,6 +60,7 @@ MIGRATIONS = (
     ("clips", "delivered_at", "TEXT"),
     ("clips", "done_at", "TEXT"),
     ("clips", "message_deleted", "INTEGER DEFAULT 0"),
+    ("posts", "duration_sec", "REAL"),
 )
 
 # Clip statuses: picked -> rendered -> delivered (sent to Telegram) -> posted | rejected.
@@ -307,14 +309,25 @@ def clip_for_message(conn: sqlite3.Connection, message_id: int) -> sqlite3.Row |
     ).fetchone()
 
 
-def add_post(conn: sqlite3.Connection, clip_id: str, platform: str, url: str) -> bool:
-    """Record where a clip was posted. Returns False if this URL was already known."""
+def add_post(
+    conn: sqlite3.Connection,
+    clip_id: str,
+    platform: str,
+    url: str,
+    duration_sec: float | None = None,
+) -> bool:
+    """Record where a clip was posted, with the clip's length (default: from the clip's
+    start/end) so views can be compared by length later. False if the URL is known."""
     if conn.execute("SELECT 1 FROM posts WHERE clip_id = ? AND url = ?", (clip_id, url)).fetchone():
         return False
+    if duration_sec is None:
+        clip = get_clip(conn, clip_id)
+        if clip is not None and clip["start_sec"] is not None and clip["end_sec"] is not None:
+            duration_sec = round(clip["end_sec"] - clip["start_sec"], 2)
     conn.execute(
-        "INSERT INTO posts(clip_id, platform, url, posted_at, submitted_to_campaign)"
-        " VALUES (?, ?, ?, ?, 0)",
-        (clip_id, platform, url, now()),
+        "INSERT INTO posts(clip_id, platform, url, posted_at, submitted_to_campaign,"
+        " duration_sec) VALUES (?, ?, ?, ?, 0, ?)",
+        (clip_id, platform, url, now(), duration_sec),
     )
     return True
 

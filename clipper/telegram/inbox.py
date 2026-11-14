@@ -32,6 +32,7 @@ MESSAGE_LIMIT = 4096
 HARD_UPLOAD_LIMIT = 50e6  # Bot API upload limit
 AUDIO_KBPS = 160
 OFFSET_KEY = "telegram_offset"
+BOT_LOCK = "telegram-bot.lock"  # held by `python -m clipper.telegram bot`
 URL_RE = re.compile(r"https?://[^\s<>\"']+")
 PLATFORMS = (
     ("youtube_shorts", re.compile(r"(^|\.)(youtube\.com|youtu\.be)$")),

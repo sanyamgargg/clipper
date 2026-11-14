@@ -23,14 +23,14 @@ from clipper import db
 from clipper.config import Config, load_config
 from clipper.disk import InsufficientDiskSpace, ensure_free_space
 from clipper.llm.claude_cli import ClaudeCLIError
-from clipper.proc import AlreadyRunning, run_lock
+from clipper.proc import AlreadyRunning, lock_held, run_lock
 from clipper.stages.discover import discover
 from clipper.stages.fetch import VideoMeta, fetch_audio, fetch_segment, probe
 from clipper.stages.pick import Clip, load_clips, pick, save_clips
 from clipper.stages.render import render_clip
 from clipper.stages.transcribe import transcribe
 from clipper.telegram.api import TelegramError
-from clipper.telegram.inbox import Inbox, deliver, open_inbox, poll
+from clipper.telegram.inbox import BOT_LOCK, Inbox, deliver, open_inbox, poll
 from clipper.timing import Word, load_words
 
 log = logging.getLogger("clipper.run")
@@ -209,8 +209,8 @@ def run_pipeline(cfg: Config, conn: sqlite3.Connection, discover_new: bool = Tru
             discover(cfg, conn)
 
     inbox = open_inbox(cfg, conn)
-    if inbox:
-        _poll_once(inbox)  # apply buttons pressed while the bot was not running
+    if inbox and not lock_held(cfg.data_dir, BOT_LOCK):
+        _poll_once(inbox)  # the bot is not running: apply buttons pressed meanwhile
 
     failures = stage_audio(cfg, conn)
     failures += stage_transcribe(cfg, conn)

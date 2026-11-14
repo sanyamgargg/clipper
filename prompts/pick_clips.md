@@ -6,10 +6,17 @@ standalone YouTube Shorts / Instagram Reels.
 - A transcript, one line per segment: `[mm:ss] text`.
 
 ## Pick {{CANDIDATES}} clips. Each clip must:
-- Be {{MIN_SEC}}–{{MAX_SEC}} seconds long.
+- Be {{MIN_SEC}}–{{MAX_SEC}} seconds long, and preferably {{TARGET_MIN_SEC}}–{{TARGET_MAX_SEC}} seconds: short clips get
+  watched to the end.
+- Only a story that truly needs the room (setup, turn, payoff) may run up to {{STORY_MAX_SEC}} seconds; mark it
+  `"story": true`. Every other clip is `"story": false` and stays within {{MAX_SEC}} seconds.
+- Start at the most gripping sentence (claim, question, surprising fact, conflict, strong emotion), not where the
+  topic starts. No warm-up.
+- Cut setup the hook can replace: the on-screen hook text gives the context, so begin as close to the point as
+  the clip still makes sense.
+- End on the payoff line (punchline, conclusion, reveal or quotable line) and stop right after it. Never end
+  mid-thought or on filler after the payoff.
 - Make sense with zero context: a viewer who never saw the full video understands it.
-- Open with a strong first sentence (claim, question, surprising fact, conflict, strong emotion). No warm-up.
-- End on a payoff: punchline, conclusion, reveal or a quotable line. Never end mid-thought.
 - Not overlap other picked clips.
 - Respect the campaign rules.
 
@@ -27,10 +34,11 @@ Return ONLY valid JSON, no prose, no code fences:
     {
       "start": "mm:ss",
       "end": "mm:ss",
-      "hook_text": "max 5 words and 28 characters, shown very large for the first 3 seconds; write the 1-2 key words in ALL CAPS (they are highlighted)",
+      "hook_text": "max 5 words and 28 characters, shown very large for the first 3 seconds; it replaces the setup you cut; write the 1-2 key words in ALL CAPS (they are highlighted)",
       "title": "max 70 chars, curiosity-driven, no clickbait lies",
       "reason": "one sentence: why this will hold attention",
-      "score": 0.0
+      "score": 0.0,
+      "story": false
     }
   ]
 }

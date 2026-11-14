@@ -30,6 +30,7 @@ class PickedClip(BaseModel):
     title: str = Field(min_length=1)
     reason: str = ""
     score: float = 0.0
+    story: bool = False  # a story may run up to pipeline.clip_story_max_sec
 
 
 class PickResponse(BaseModel):
@@ -48,6 +49,7 @@ class Clip:
     reason: str
     score: float
     layout: str = "crop"  # crop (face-tracked 9:16 crop) | fit (full frame on a blurred fill)
+    story: bool = False  # Claude marked it a story: allowed up to clip_story_max_sec
 
 
 def load_clips(path: Path) -> list[Clip]:
@@ -77,10 +79,15 @@ def campaign_rules_text(campaign: Campaign) -> str:
 
 def build_prompt(cfg: Config, campaign: Campaign, compact: str) -> str:
     lo, hi = cfg.clip_bounds(campaign)
+    story_hi = cfg.clip_bounds(campaign, story=True)[1]
+    p = cfg.pipeline
     values = {
-        "CANDIDATES": str(cfg.pipeline.candidates_per_video),
+        "CANDIDATES": str(p.candidates_per_video),
         "MIN_SEC": f"{lo:g}",
         "MAX_SEC": f"{hi:g}",
+        "TARGET_MIN_SEC": f"{max(lo, p.clip_target_min_sec):g}",
+        "TARGET_MAX_SEC": f"{min(hi, p.clip_target_max_sec):g}",
+        "STORY_MAX_SEC": f"{story_hi:g}",
         "CAMPAIGN_RULES": campaign_rules_text(campaign),
         "TRANSCRIPT": compact.strip(),
     }
@@ -108,12 +115,15 @@ def resolve_clips(
     campaign: Campaign,
     min_sec: float,
     max_sec: float,
+    story_max_sec: float | None = None,
 ) -> list[Clip]:
-    """Snap picks to sentence boundaries; drop bad timestamps, wrong lengths and overlaps."""
+    """Snap picks to sentence boundaries; drop bad timestamps, wrong lengths and overlaps.
+    Picks marked `story` may run up to `story_max_sec`; others are trimmed to `max_sec`."""
     clips: list[Clip] = []
     for p in sorted(picked, key=lambda c: c.score, reverse=True):
+        limit = max(max_sec, story_max_sec or max_sec) if p.story else max_sec
         try:
-            span = snap_clip(words, parse_ts(p.start), parse_ts(p.end), min_sec, max_sec)
+            span = snap_clip(words, parse_ts(p.start), parse_ts(p.end), min_sec, limit)
         except ValueError:
             span = None
         if span is None:
@@ -137,6 +147,7 @@ def resolve_clips(
                 caption=make_caption(p.title, campaign),
                 reason=p.reason.strip(),
                 score=p.score,
+                story=p.story,
             )
         )
     return clips
@@ -183,13 +194,17 @@ def pick(
             "Your previous reply was not valid for the required JSON schema.\n"
             f"Error: {exc}\n\n"
             'Return ONLY the corrected JSON object {"clips": [{"start", "end", "hook_text", '
-            '"title", "reason", "score"}]}, no prose, no code fences.\n\n'
+            '"title", "reason", "score", "story"}]}, no prose, no code fences.\n\n'
             f"Previous reply:\n{text}"
         )
         response = parse_response(_ask(cfg, conn, video_id, fix))
 
     lo, hi = cfg.clip_bounds(campaign)
-    clips = resolve_clips(response.clips, load_words(words_path), video_id, campaign, lo, hi)
+    story_hi = cfg.clip_bounds(campaign, story=True)[1]
+    clips = resolve_clips(response.clips, load_words(words_path), video_id, campaign, lo, hi,
+                          story_hi)  # fmt: skip
+    if stories := sum(c.story for c in clips):
+        log.info("%d of %d clips are stories (up to %g s)", stories, len(clips), story_hi)
     if not clips:
         raise RuntimeError("claude returned no usable clips")
     for c in clips:

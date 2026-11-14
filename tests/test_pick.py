@@ -76,11 +76,39 @@ def test_caption_does_not_repeat_hashtag():
     assert clips[0].caption == "Wild #tjr take"
 
 
+def test_story_clips_may_run_longer():
+    # 4 sentences of 2.5 s; normal clips are capped at 5.5 s, stories at 11 s
+    long_pick = {"start": "00:00", "end": "00:10", "hook_text": "h", "title": "t", "score": 0.9}
+    normal = resolve_clips([PickedClip(**long_pick)], WORDS, "vid", CAMPAIGN, 2, 5.5, 11)
+    story = resolve_clips([PickedClip(**long_pick, story=True)], WORDS, "vid", CAMPAIGN, 2, 5.5, 11)
+    assert normal[0].end_sec - normal[0].start_sec <= 5.5 + 0.4  # trimmed to whole sentences
+    assert story[0].end_sec - story[0].start_sec > 9  # keeps all four sentences
+    assert (normal[0].story, story[0].story) == (False, True)
+    assert (
+        parse_response(
+            '{"clips": [{"start": "0:01", "end": "0:30", "hook_text": "h", "title": "t"}]}'
+        )
+        .clips[0]
+        .story
+        is False
+    )  # optional in Claude's reply
+
+
+def test_clip_bounds_story_and_campaign_limits():
+    cfg = Config(campaigns=[CAMPAIGN])  # pipeline 18-35, story 45; campaign rules 15-60
+    assert cfg.clip_bounds(CAMPAIGN) == (18, 35)
+    assert cfg.clip_bounds(CAMPAIGN, story=True) == (18, 45)
+    strict = Campaign(id="x", name="x", rules=Rules(min_sec=20, max_sec=40))
+    assert cfg.clip_bounds(strict, story=True) == (20, 40)  # the campaign always wins
+
+
 def test_build_prompt_fills_every_placeholder():
     cfg = Config(campaigns=[CAMPAIGN])
     prompt = build_prompt(cfg, CAMPAIGN, "[00:00] Hello there.")
     assert "{{" not in prompt
-    assert "Pick 5 clips" in prompt and "20–45 seconds" in prompt
+    assert "Pick 5 clips" in prompt and "18–35 seconds long, and preferably 20–30 seconds" in prompt
+    assert "may run up to 45 seconds" in prompt and '"story": false' in prompt
+    assert "most gripping sentence" in prompt and "payoff line" in prompt
     assert "Look for: Funny moments" in prompt and "Must feature: TJR speaks" in prompt
     assert "portray the creator or brand negatively" in prompt
     assert prompt.rstrip().endswith("[00:00] Hello there.")

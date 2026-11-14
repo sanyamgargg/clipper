@@ -24,8 +24,11 @@ class Pipeline(BaseModel):
     max_source_minutes: float = 120  # longer videos are skipped (status skipped_too_long)
     max_retries: int = 3  # a failed video/clip is retried on up to this many later runs
     candidates_per_video: int = 5
-    clip_min_sec: float = 20
-    clip_max_sec: float = 45
+    clip_min_sec: float = 18
+    clip_max_sec: float = 35
+    clip_story_max_sec: float = 45  # only for clips Claude marks "story": true
+    clip_target_min_sec: float = 20  # length the prompt asks Claude to prefer
+    clip_target_max_sec: float = 30
 
 
 class Render(BaseModel):
@@ -53,6 +56,9 @@ class Render(BaseModel):
 
 
 class Claude(BaseModel):
+    # Keychain item holding the `claude setup-token` token; run_nightly.sh exports it as
+    # CLAUDE_CODE_OAUTH_TOKEN
+    keychain_service: str = "clipper-claude-oauth"
     model: str = "sonnet"
     max_turns: int = 3
     timeout_sec: int = 300
@@ -126,11 +132,13 @@ class Config(BaseModel):
                 return c
         raise KeyError(f"campaign not found: {campaign_id or '(any active)'}")
 
-    def clip_bounds(self, campaign: Campaign) -> tuple[float, float]:
-        """Clip length limits: pipeline defaults narrowed to the campaign's rules."""
-        lo = max(self.pipeline.clip_min_sec, campaign.rules.min_sec)
-        hi = min(self.pipeline.clip_max_sec, campaign.rules.max_sec)
-        return lo, hi
+    def clip_bounds(self, campaign: Campaign, story: bool = False) -> tuple[float, float]:
+        """Clip length limits: pipeline settings narrowed to the campaign's rules. Stories
+        (Claude's `"story": true`) may run up to clip_story_max_sec."""
+        p = self.pipeline
+        lo = max(p.clip_min_sec, campaign.rules.min_sec)
+        hi = max(p.clip_max_sec, p.clip_story_max_sec) if story else p.clip_max_sec
+        return lo, min(hi, campaign.rules.max_sec)
 
 
 def load_config(path: Path | None = None) -> Config:

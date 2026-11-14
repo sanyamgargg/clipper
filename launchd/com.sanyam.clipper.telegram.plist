@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Telegram bot, always running while logged in. Template: scripts/install_launchd.sh
+     fills in __REPO__ and __LOGS__. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.sanyam.clipper.telegram</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__REPO__/scripts/run_bot.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__REPO__</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <!-- restart at most every 30 s if it keeps crashing -->
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <!-- the bot logs to __LOGS__/telegram.log; this only catches startup errors -->
+  <key>StandardOutPath</key>
+  <string>__LOGS__/launchd-telegram.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOGS__/launchd-telegram.log</string>
+</dict>
+</plist>
