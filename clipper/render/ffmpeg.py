@@ -37,31 +37,48 @@ def encoder_args(encoder: str, bitrate: str) -> list[str]:
     return args
 
 
+def video_filter(r: Render, crop: Crop | None, cmd_file: str | None, ass_file: str) -> str:
+    """filter_complex graph from [0:v] to [v].
+
+    crop layout (`crop` given): crop window, moved by sendcmd, scaled to the output size.
+    fit layout (`crop` is None): the whole frame scaled to fit, centred over a blurred,
+    slightly darkened copy of itself that fills the output."""
+    if crop is None:
+        bw, bh = r.width // 4, r.height // 4  # blur at quarter size: cheap, and softer
+        chain = (
+            f"[0:v]fps={r.fps},split[a][b];"
+            f"[a]scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh},"
+            f"boxblur=8:2,scale={r.width}:{r.height},eq=brightness=-0.08[bg];"
+            f"[b]scale={r.width}:{r.height}:force_original_aspect_ratio=decrease:"
+            f"force_divisible_by=2:flags=lanczos[fg];"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2"
+        )
+    else:
+        send = f"sendcmd=f={cmd_file}," if cmd_file else ""
+        x0 = crop.xs[0] if crop.xs else 0
+        chain = (
+            f"[0:v]fps={r.fps},{send}crop={crop.w}:{crop.h}:{x0}:{crop.y},"
+            f"scale={r.width}:{r.height}:flags=lanczos"
+        )
+    return f"{chain},setsar=1,ass={ass_file}[v]"
+
+
 def render_cmd(
     src: Path,
     out: Path,
-    crop: Crop,
+    crop: Crop | None,
     r: Render,
     encoder: str,
     cmd_file: str | None,
     ass_file: str,
 ) -> list[str]:
-    """Crop (moving x via sendcmd) -> scale -> burn captions; normalize loudness.
+    """Lay out the video (see video_filter), burn captions, normalize loudness.
     `cmd_file` and `ass_file` are bare file names: run ffmpeg with cwd = their directory,
     which avoids filter-path escaping."""
-    x0 = crop.xs[0] if crop.xs else 0
-    vf = [f"fps={r.fps}"]
-    if cmd_file:
-        vf.append(f"sendcmd=f={cmd_file}")
-    vf += [
-        f"crop={crop.w}:{crop.h}:{x0}:{crop.y}",
-        f"scale={r.width}:{r.height}:flags=lanczos",
-        "setsar=1",
-        f"ass={ass_file}",
-    ]
     return [
         "ffmpeg", "-y", "-v", "error", "-i", str(src),
-        "-vf", ",".join(vf),
+        "-filter_complex", video_filter(r, crop, cmd_file, ass_file),
+        "-map", "[v]", "-map", "0:a:0",
         "-af", f"loudnorm=I={r.loudness_lufs:g}:TP=-1.5:LRA=11",
         *encoder_args(encoder, r.video_bitrate),
         "-c:a", "aac", "-b:a", "160k", "-ar", "48000",

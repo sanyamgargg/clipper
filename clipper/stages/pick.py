@@ -47,10 +47,15 @@ class Clip:
     caption: str  # title + required campaign hashtags/text, ready to paste when posting
     reason: str
     score: float
+    layout: str = "crop"  # crop (face-tracked 9:16 crop) | fit (full frame on a blurred fill)
 
 
 def load_clips(path: Path) -> list[Clip]:
     return [Clip(**d) for d in json.loads(path.read_text())]
+
+
+def save_clips(clips: list[Clip], path: Path) -> None:
+    path.write_text(json.dumps([asdict(c) for c in clips], indent=2))
 
 
 def campaign_rules_text(campaign: Campaign) -> str:
@@ -183,9 +188,11 @@ def pick(
     clips = resolve_clips(response.clips, load_words(words_path), video_id, campaign, lo, hi)
     if not clips:
         raise RuntimeError("claude returned no usable clips")
-    clips_path.write_text(json.dumps([asdict(c) for c in clips], indent=2))
+    for c in clips:
+        c.layout = cfg.render.default_layout
+    save_clips(clips, clips_path)
     for c in clips:
         db.upsert_clip(conn, c.id, c.video_id, c.start_sec, c.end_sec, c.hook_text, c.title,
-                       c.reason, c.score, status="picked")  # fmt: skip
+                       c.reason, c.score, status="picked", layout=c.layout)  # fmt: skip
     log.info("picked %d clips", len(clips))
     return clips

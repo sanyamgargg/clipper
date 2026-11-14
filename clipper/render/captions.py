@@ -20,8 +20,8 @@ Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle,
 Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Caption,{font},{size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,\
 -1,0,0,0,100,100,0,0,1,6,2,5,60,60,0,1
-Style: Hook,{font},{hook_size},&H00000000,&H00000000,&H00FFFFFF,&H00FFFFFF,\
--1,0,0,0,100,100,0,0,3,10,0,8,90,90,{hook_margin},1
+Style: Hook,{font},{hook_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,\
+-1,0,0,0,100,100,0,0,1,{hook_outline},4,5,0,0,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -85,6 +85,30 @@ def ass_time(sec: float) -> str:
     return f"{cs // 360000}:{cs // 6000 % 60:02d}:{cs // 100 % 60:02d}.{cs % 100:02d}"
 
 
+HOOK_CHAR_EM = 0.6  # average glyph width of a bold sans font in ems (errs on the wide side)
+HOOK_MIN_SIZE = 56
+HOOK_SIDE_MARGIN = 60
+
+
+def fit_hook(text: str, max_width: int, max_size: int) -> tuple[list[str], int]:
+    """Lay the hook out on at most 2 lines, as big as fits `max_width` (up to `max_size`).
+    One line if that already reaches `max_size`, else the most balanced 2-line split."""
+    words = text.split()
+    if not words:
+        return [], max_size
+
+    def size_for(lines: list[str]) -> int:
+        return int(max_width / (HOOK_CHAR_EM * max(len(line) for line in lines)))
+
+    best = [" ".join(words)]
+    if size_for(best) < max_size:
+        for k in range(1, len(words)):
+            cand = [" ".join(words[:k]), " ".join(words[k:])]
+            if size_for(cand) > size_for(best):
+                best = cand
+    return best, max(HOOK_MIN_SIZE, min(max_size, size_for(best)))
+
+
 def build_ass(
     words: list[Word],
     hook_text: str,
@@ -95,23 +119,28 @@ def build_ass(
     font_size: int,
     y_frac: float,
     hook_sec: float,
+    hook_size: int,
+    hook_y_frac: float,
 ) -> str:
-    """Full ASS file. `words` must be relative to the clip start (t=0)."""
+    """Full ASS file. `words` must be relative to the clip start (t=0). `hook_size` is the
+    largest hook font size; long hooks shrink to stay on 2 lines."""
+    hook = hook_text.replace("{", "").replace("}", "").replace("\\", "")
+    hook_lines, size = fit_hook(hook, width - 2 * HOOK_SIDE_MARGIN, hook_size)
     lines = [
         HEADER.format(
             width=width,
             height=height,
             font=font,
             size=font_size,
-            hook_size=round(font_size * 0.75),
-            hook_margin=round(height * 0.12),
+            hook_size=size,
+            hook_outline=max(6, round(size * 0.08)),
         )
     ]
-    hook = " ".join(hook_text.replace("{", "").replace("}", "").replace("\\", "").split())
-    if hook and hook_sec > 0:
-        lines.append(
-            f"Dialogue: 0,{ass_time(0)},{ass_time(hook_sec)},Hook,,0,0,0,,{{\\fad(0,200)}}{hook}\n"
-        )
+    if hook_lines and hook_sec > 0:
+        # \q2: no automatic wrapping, so the hook can never spill onto a third line
+        tags = f"{{\\q2\\pos({width // 2},{round(height * hook_y_frac)})\\fad(0,200)}}"
+        text = "\\N".join(hook_lines)
+        lines.append(f"Dialogue: 0,{ass_time(0)},{ass_time(hook_sec)},Hook,,0,0,0,,{tags}{text}\n")
     pos = f"{{\\pos({width // 2},{round(height * y_frac)})}}"
     for start, end, text in caption_events(chunk_words(words)):
         lines.append(f"Dialogue: 1,{ass_time(start)},{ass_time(end)},Caption,,0,0,0,,{pos}{text}\n")

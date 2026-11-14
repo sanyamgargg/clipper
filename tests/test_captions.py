@@ -8,6 +8,7 @@ from clipper.render.captions import (
     caption_events,
     chunk_words,
     display,
+    fit_hook,
 )
 from clipper.timing import Word
 
@@ -83,24 +84,51 @@ def test_ass_time():
     assert ass_time(3723.5) == "1:02:03.50"
 
 
+ASS_ARGS = {
+    "width": 1080,
+    "height": 1920,
+    "font": "Arial",
+    "font_size": 84,
+    "y_frac": 0.66,
+    "hook_sec": 2.5,
+    "hook_size": 150,
+    "hook_y_frac": 0.175,
+}
+
+
+def test_fit_hook_short_text_is_one_line_at_max_size():
+    assert fit_hook("Red flag.", 960, 150) == (["Red flag."], 150)
+
+
+def test_fit_hook_splits_into_two_balanced_lines():
+    lines, size = fit_hook("I moved and noticed something", 960, 150)
+    assert lines == ["I moved and", "noticed something"]
+    assert size == int(960 / (0.6 * 17)) == 94
+
+
+def test_fit_hook_never_more_than_two_lines_and_has_a_floor():
+    lines, size = fit_hook("word " * 30, 960, 150)
+    assert len(lines) == 2 and size == 56
+    assert fit_hook("", 960, 150) == ([], 150)
+
+
 def test_build_ass_has_hook_and_positioned_captions():
-    ass = build_ass(
-        make_words("Hello there."),
-        "Big {hook}\ntext",
-        width=1080,
-        height=1920,
-        font="Arial",
-        font_size=84,
-        y_frac=0.66,
-        hook_sec=2.5,
-    )
+    ass = build_ass(make_words("Hello there."), "Big {hook}\ntext", **ASS_ARGS)
     assert "PlayResX: 1080" in ass and "Style: Caption,Arial,84," in ass
-    assert "Dialogue: 0,0:00:00.00,0:00:02.50,Hook,,0,0,0,,{\\fad(0,200)}Big hook text\n" in ass
+    # white text, black outline, sized to fit; centred at 17.5% of the height
+    assert "Style: Hook,Arial,150,&H00FFFFFF,&H00FFFFFF,&H00000000," in ass
+    assert (
+        "Dialogue: 0,0:00:00.00,0:00:02.50,Hook,,0,0,0,,"
+        "{\\q2\\pos(540,336)\\fad(0,200)}Big hook\\Ntext\n"
+    ) in ass
     assert ass.count("Dialogue: 1,") == 2
     assert "{\\pos(540,1267)}" in ass
 
 
+def test_build_ass_long_hook_wraps_to_two_lines():
+    ass = build_ass([], "Rich people asking YOU for help? Red flag.", **ASS_ARGS)
+    assert "}Rich people asking YOU\\Nfor help? Red flag.\n" in ass
+
+
 def test_build_ass_without_hook():
-    ass = build_ass([], "", width=1080, height=1920, font="Arial", font_size=84, y_frac=0.66,
-                    hook_sec=2.5)  # fmt: skip
-    assert "Dialogue" not in ass
+    assert "Dialogue" not in build_ass([], "", **ASS_ARGS)

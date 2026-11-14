@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS videos(
     status TEXT, error TEXT, created_at TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS clips(
     id TEXT PRIMARY KEY, video_id TEXT, start_sec REAL, end_sec REAL, hook_text TEXT, title TEXT,
-    reason TEXT, score REAL, status TEXT, file_path TEXT, created_at TEXT);
+    reason TEXT, score REAL, status TEXT, file_path TEXT, created_at TEXT,
+    layout TEXT DEFAULT 'crop');
 CREATE TABLE IF NOT EXISTS posts(
     id INTEGER PRIMARY KEY, clip_id TEXT, platform TEXT, url TEXT, posted_at TEXT, views INT,
     views_checked_at TEXT, submitted_to_campaign INT, campaign_status TEXT, earnings REAL);
@@ -39,6 +40,9 @@ def connect(data_dir: Path) -> sqlite3.Connection:
     data_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(data_dir / "clipper.db", isolation_level=None)  # autocommit
     conn.executescript(SCHEMA)
+    # migration: databases created before the layout setting existed
+    if "layout" not in {row[1] for row in conn.execute("PRAGMA table_info(clips)")}:
+        conn.execute("ALTER TABLE clips ADD COLUMN layout TEXT DEFAULT 'crop'")
     return conn
 
 
@@ -121,14 +125,15 @@ def upsert_clip(
     score: float,
     status: str,
     file_path: str | None = None,
+    layout: str = "crop",
 ) -> None:
     conn.execute(
         "INSERT INTO clips(id, video_id, start_sec, end_sec, hook_text, title, reason, score,"
-        " status, file_path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        " status, file_path, created_at, layout) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         " ON CONFLICT(id) DO UPDATE SET start_sec = excluded.start_sec,"
         " end_sec = excluded.end_sec, hook_text = excluded.hook_text, title = excluded.title,"
         " reason = excluded.reason, score = excluded.score, status = excluded.status,"
-        " file_path = excluded.file_path",
+        " file_path = excluded.file_path, layout = excluded.layout",
         (clip_id, video_id, start_sec, end_sec, hook_text, title, reason, score, status,
-         file_path, now()),
+         file_path, now(), layout),
     )  # fmt: skip

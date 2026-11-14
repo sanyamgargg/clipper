@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -35,7 +35,11 @@ class Render(BaseModel):
     caption_font: str = "Arial"  # must be installed on this machine
     caption_font_size: int = 84
     caption_y_frac: float = 0.66  # caption centre, as a fraction of frame height
+    caption_y_frac_fit: float = 0.72  # fit layout: captions sit below the video band
     hook_sec: float = 2.5
+    hook_font_size: int = 150  # largest size; long hooks shrink to stay on 2 lines
+    hook_y_frac: float = 0.175  # hook centre, as a fraction of frame height
+    default_layout: Literal["crop", "fit"] = "crop"  # per clip, can be changed later
     face_model: str = "blaze_face_short_range"  # data/models/<name>.tflite
 
 
