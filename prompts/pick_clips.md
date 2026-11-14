@@ -35,6 +35,9 @@ Return ONLY valid JSON, no prose, no code fences:
   ]
 }
 
+`start` is the timestamp of the clip's first transcript line. `end` is the timestamp of the first line AFTER the
+clip (the clip stops right before that line). Clips are cut on line boundaries, so pick whole lines.
+
 `score` is 0–1, your confidence it will hold viewers to the end. Order clips by score, highest first.
 
 ## Transcript

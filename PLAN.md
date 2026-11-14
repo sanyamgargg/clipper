@@ -225,3 +225,21 @@ Build M0–M4 first (≈ 2 weekends). M5–M6 only if the test in §11 looks pos
 - Credit runs out mid-month → pipeline pauses gracefully at `pick`; switch to Haiku.
 - 8 GB RAM pressure → sequential stages, overnight runs.
 - Payout delays/pending balances on marketplaces → withdraw promptly, track in `posts`.
+
+## 13. First campaign: TJR (Reach, via Content Rewards) — implications
+Full rules: https://reachclipping.com/TJR (also stored in `config.yaml` → `campaigns[tjr].rules`).
+
+- **Config schema:** campaign `rules` now has extra fields (`required_hashtags`, `mvr_views`, `submit_within_minutes`,
+  `must_feature`, `no_logos`, `look_for`, ...). The config model must accept them, and `pick` must pass
+  `look_for`, `must_feature` and `no_negative_portrayal` into the clip-picking prompt.
+- **Captions/titles:** always append required hashtags (`#TJR`). English only.
+- **No logos/watermarks:** never add our own branding; avoid crops that keep third-party logo overlays when possible.
+- **Thumbnails:** a frame from the clip itself, different per clip.
+- **30-minute submission rule:** the link must be submitted on Content Rewards within 30 min of posting.
+  Publishing (manual or API) must happen only when Sanyam can submit right after. In M6, auto-publish must send a
+  notification with the post URL so it can be submitted immediately; never post at night unattended.
+- **Payout threshold:** a clip earns only after 5,000 views (MVR). Track views per post against `mvr_views`.
+- **Audience risk:** campaign requires 50%+ audience from USA/CA/AU/UK/NZ. Accounts run from India may skew to
+  Indian viewers. Check audience geography in YouTube/Instagram analytics after the first week.
+- **Sources:** YouTube @TJRTrades (videos + streams) and @TRichesTrades. Streams are long: transcribe only, then
+  download/cut just the needed segments if disk is tight.

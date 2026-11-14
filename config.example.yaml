@@ -3,6 +3,10 @@ machine:
   whisper_model: large-v3-turbo-q5_0
   video_encoder: h264_videotoolbox    # h264_videotoolbox | h264_qsv | libx264
   data_dir: ./data
+  min_free_gb: 5                      # stop before downloading/rendering if less disk is free
+
+render:
+  caption_font: Arial                 # bold sans font installed on this machine
 
 pipeline:
   videos_per_night: 2
