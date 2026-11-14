@@ -39,6 +39,8 @@ class Render(BaseModel):
     caption_font_size: int = 90  # em height in px
     caption_y_frac: float = 0.66  # caption centre, as a fraction of frame height
     caption_y_frac_fit: float = 0.72  # fit layout: captions sit below the video band
+    caption_face_gap: float = 0.04  # caption y >= face bottom + this (fraction of height)
+    caption_max_y_frac: float = 0.78  # but never below this
     hook_style: Literal["box", "outline"] = "outline"
     hook_sec: float = 3.0
     hook_font_size: int = 150  # largest em height in px; shrinks to fit width / face
@@ -47,6 +49,7 @@ class Render(BaseModel):
     hook_top_limit_frac: float = 0.05  # hook never starts higher than this
     default_layout: Literal["crop", "fit"] = "crop"  # per clip, can be changed later
     face_model: str = "blaze_face_short_range"  # data/models/<name>.tflite
+    person_model: str = "efficientdet_lite0"  # fallback when no face: object detector
 
 
 class Claude(BaseModel):

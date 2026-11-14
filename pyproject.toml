@@ -11,7 +11,7 @@ dependencies = [
     "pyyaml>=6",
     "pydantic>=2",
     "fonttools>=4",
-    "yt-dlp",
+    "yt-dlp[default]",  # includes yt-dlp-ejs: YouTube JS challenge solver (runs on deno)
     "mediapipe",
     "fastapi",
     "uvicorn",

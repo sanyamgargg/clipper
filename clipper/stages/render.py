@@ -29,6 +29,8 @@ def _caption_style(cfg: Config, fit: bool) -> CaptionStyle:
         font=r.caption_font,
         caption_px=r.caption_font_size,
         caption_y_frac=r.caption_y_frac_fit if fit else r.caption_y_frac,
+        caption_face_gap=r.caption_face_gap,
+        caption_max_y_frac=r.caption_max_y_frac,
         hook_style=r.hook_style,
         hook_sec=r.hook_sec,
         hook_max_px=r.hook_font_size,
@@ -77,33 +79,46 @@ def render_clip(
 
         # 1. faces: the crop path (crop layout) and where the hook goes (both layouts).
         #    The detector is freed before ffmpeg starts: one heavy step at a time.
-        model = facetrack.ensure_model(cfg.data_dir / "models", r.face_model)
-        faces = facetrack.detect_faces(segment, model, src_w, src_h)
-        log.info("%s: face in %d/%d sampled frames", clip.id, sum(1 for f in faces if f),
-                 len(faces))  # fmt: skip
-        track = facetrack.track_primary(faces)
+        models = cfg.data_dir / "models"
+        face_model = facetrack.ensure_model(models, r.face_model, "face")
+        person_model = facetrack.ensure_model(models, r.person_model, "object")
+        frames = facetrack.detect_faces(segment, face_model, src_w, src_h, person_model)
+        n_face = sum(any(f.kind == "face" for f in fs) for fs in frames)
+        n_person = sum(any(f.kind == "person" for f in fs) for fs in frames)
+        track = facetrack.track_primary(frames)
+        subjects = facetrack.tracked(frames, track)
+        cuts = facetrack.shot_cuts(subjects)
+        log.info("%s: %d samples: face %d, person only %d, nothing %d; shot cuts at %s",
+                 clip.id, len(frames), n_face, n_person, len(frames) - n_face - n_person,
+                 [round(i / facetrack.SAMPLE_FPS, 1) for i in sorted(cuts)])  # fmt: skip
         crop, cmd_file = None, None
         if not fit:
             n_frames = int(duration * r.fps) + 1
-            centers = facetrack.smooth_path(track)
-            crop = facetrack.crop_path(centers, src_w, src_h, r.width, r.height, n_frames, r.fps)
+            centers = facetrack.smooth_path(track, cuts=cuts)
+            cut_times = facetrack.scene_cuts(segment) if cuts else []
+            crop = facetrack.crop_path(centers, src_w, src_h, r.width, r.height, n_frames, r.fps,
+                                       cuts=cuts, cut_times=cut_times)  # fmt: skip
+            if cut_times:
+                log.info("%s: camera cuts at %s s", clip.id, [round(t, 2) for t in cut_times])
             script = facetrack.sendcmd_script(crop, r.fps)
             if script.strip():
                 cmd_file = "crop.cmd"
                 (work / cmd_file).write_text(script)
-        top = facetrack.face_top(faces, track, int(r.hook_sec * facetrack.SAMPLE_FPS) + 1)
-        face_y = (
-            None
-            if top is None
-            else facetrack.to_output_y(top, src_w, src_h, r.width, r.height, crop)
-        )
+
+        def out_y(y: float) -> float:
+            return facetrack.to_output_y(y, src_w, src_h, r.width, r.height, crop)
+
+        top = facetrack.face_top(subjects, int(r.hook_sec * facetrack.SAMPLE_FPS) + 1)
+        face_y = None if top is None else out_y(top)
+        bottoms = [None if b is None else out_y(b) for b in facetrack.face_bottoms(subjects)]
 
         # 2. captions + hook
         metrics, fonts_arg = _fonts(cfg, work)
         cap_words = caption_words(
             words_between(words, clip.start_sec, clip.end_sec), campaign.caption_fixes
         )
-        ass = build_ass(cap_words, clip.hook_text, _caption_style(cfg, fit), metrics, face_y)
+        ass = build_ass(cap_words, clip.hook_text, _caption_style(cfg, fit), metrics, face_y,
+                        bottoms, facetrack.SAMPLE_FPS)  # fmt: skip
         (work / "captions.ass").write_text(ass)
 
         # 3. encode to a temp name, so a crash never leaves a half-written clip in place

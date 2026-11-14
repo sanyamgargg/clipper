@@ -13,6 +13,7 @@ from clipper.render.captions import (
     build_ass,
     caption_events,
     caption_words,
+    caption_ys,
     chunk_fit,
     chunk_words,
     display,
@@ -146,6 +147,42 @@ def test_chunk_fit_shrinks_only_chunks_that_would_overflow(montserrat):
     assert f"\\fscx{round(100 * fit)}" in event and "\\fscx100" not in event
 
 
+def chunks_at(*starts: float, dur: float = 0.8) -> list[list[Word]]:
+    """One single-word chunk per start time."""
+    return [[Word("w", s, s + dur)] for s in starts]
+
+
+YS = {"default_y": 1267, "gap": 77, "max_y": 1498, "sample_fps": 5}
+
+
+def test_caption_y_default_without_a_face():
+    assert caption_ys(chunks_at(0, 1, 2), None, **YS) == [1267, 1267, 1267]
+    assert caption_ys(chunks_at(0, 1), [None] * 10, **YS) == [1267, 1267]
+
+
+def test_caption_y_moves_below_a_low_face_and_is_clamped():
+    assert caption_ys(chunks_at(0), [1000] * 5, **YS) == [1267]  # face high: default
+    assert caption_ys(chunks_at(0), [1300] * 5, **YS) == [1377]  # bottom + 4%
+    assert caption_ys(chunks_at(0), [1700] * 5, **YS) == [1498]  # never below 78%
+
+
+def test_caption_y_uses_the_lowest_face_bottom_during_the_chunk_and_holds_gaps():
+    bottoms = [1200, 1200, 1350, None, None, None, None, None, None, None]
+    # chunk 0 spans samples 0..4: the 1350 sample counts; chunk 1 holds the last bottom
+    assert caption_ys(chunks_at(0, 1.2), bottoms, **YS) == [1427, 1427]
+
+
+def test_caption_y_is_smoothed_between_chunks():
+    smooth = {**YS, "deadband": 38, "step": 58}
+    bottoms = [1300] * 5 + [1320] * 5 + [1000] * 15
+    ys = caption_ys(chunks_at(0, 1, 2, 3, 4), bottoms, **smooth)
+    assert ys[0] == 1377
+    assert ys[1] == 1377  # +20 px is inside the deadband: no jump
+    assert ys[2:] == [1319, 1267, 1267]  # face moves up: ease back 58 px per chunk
+    down = caption_ys(chunks_at(0, 1), [1000] * 5 + [1400] * 5, **smooth)
+    assert down == [1267, 1477]  # moving down to clear the face is immediate
+
+
 def test_ass_time():
     assert ass_time(0) == "0:00:00.00"
     assert ass_time(75.239) == "0:01:15.24"
@@ -250,7 +287,7 @@ def test_build_ass_caption_style(montserrat):
         "-1,0,0,0,100,100,1,0,1,10,3,5,40,40,0,1"
     ) in ass
     assert ass.count("Dialogue: 1,") == 2
-    assert "{\\an5\\pos(540,1267)}" in ass
+    assert ass.count("{\\an5\\pos(540,1267)\\fscx") == 2  # default 66%, no face known
     assert "Dialogue: 0," not in ass  # no hook
 
 
@@ -284,3 +321,9 @@ def test_build_ass_places_hook_above_the_face(montserrat):
         return int(dialogue.split("\\pos(540,", 1)[1].split(")", 1)[0])
 
     assert hook_y(no_face) < hook_y(face) < 1000
+
+
+def test_build_ass_moves_captions_below_the_face(montserrat):
+    words = make_words("one two three four five six seven")  # 3 chunks over ~1.75 s
+    ass = build_ass(words, "", CaptionStyle(), montserrat, face_bottoms=[1400.0] * 10)
+    assert ass.count("\\an5\\pos(540,1477)") == 7  # 1400 + 4% of 1920, every word event

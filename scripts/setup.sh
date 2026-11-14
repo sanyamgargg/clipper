@@ -14,9 +14,10 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 # --- 1. brew deps -----------------------------------------------------------
 # ffmpeg-full, not ffmpeg: the slim `ffmpeg` formula has no libass (needed to burn captions).
-say_step "Homebrew packages (ffmpeg-full, whisper-cpp)"
+# deno: JavaScript runtime yt-dlp needs to solve YouTube's download challenges.
+say_step "Homebrew packages (ffmpeg-full, whisper-cpp, deno)"
 command -v brew >/dev/null || die "Homebrew not found. Install from https://brew.sh"
-for pkg in ffmpeg-full whisper-cpp; do
+for pkg in ffmpeg-full whisper-cpp deno; do
   if brew list --formula "$pkg" >/dev/null 2>&1; then
     echo "$pkg already installed"
   else

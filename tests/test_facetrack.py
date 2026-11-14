@@ -6,11 +6,14 @@ from clipper.render.facetrack import (
     Crop,
     Face,
     crop_path,
+    face_bottoms,
     face_top,
     sendcmd_script,
+    shot_cuts,
     smooth_path,
     to_output_y,
     track_primary,
+    tracked,
 )
 
 A = Face(cx=0.3, size=0.10, score=0.9)
@@ -74,13 +77,72 @@ def test_crop_path_narrow_source_keeps_full_width():
     assert (crop.w, crop.h, crop.y, crop.xs) == (1080, 1920, 0, [0, 0, 0])
 
 
+def test_tracked_returns_the_followed_detection_per_frame():
+    me, other = Face(0.3, 0.1, 0.9), Face(0.8, 0.3, 0.9)
+    assert tracked([[me, other], [], [other]], [0.3, None, 0.8]) == [me, None, other]
+
+
+def test_largest_person_is_followed_when_there_is_no_face():
+    small = Face(0.2, 0.10, 0.9, kind="person")
+    large = Face(0.6, 0.30, 0.8, kind="person")
+    assert track_primary([[small, large]]) == [0.6]
+
+
 def test_face_top_is_the_highest_top_of_the_tracked_face_while_the_hook_shows():
-    me = [Face(0.3, 0.1, 0.9, top=0.22), Face(0.3, 0.1, 0.9, top=0.18)]
-    other = Face(0.8, 0.3, 0.9, top=0.05)  # someone else, higher in frame: ignored
-    frames = [[me[0], other], [], [me[1], other], [Face(0.3, 0.1, 0.9, top=0.01)]]
-    track = [0.3, None, 0.3, 0.3]
-    assert face_top(frames, track, n=3) == 0.18  # the 4th frame is after the hook
-    assert face_top([[], []], [None, None], n=2) is None
+    subjects = [
+        Face(0.3, 0.1, 0.9, top=0.22),
+        None,
+        Face(0.3, 0.1, 0.9, top=0.18),
+        Face(0.3, 0.4, 0.9, top=0.02, kind="person"),  # a person box is not a face
+        Face(0.3, 0.1, 0.9, top=0.01),  # after the hook
+    ]
+    assert face_top(subjects, n=4) == 0.18
+    assert face_top([None, Face(0.5, 0.3, 0.9, top=0.1, kind="person")], n=2) is None
+
+
+def test_face_bottoms_are_the_estimated_chin_of_faces_only():
+    subjects = [
+        Face(0.3, 0.1, 0.9, top=0.35, bottom=0.65),  # box stops at the mouth
+        None,
+        Face(0.3, 0.4, 0.9, top=0.1, bottom=0.9, kind="person"),
+    ]
+    assert face_bottoms(subjects) == [pytest.approx(0.65 + 0.25 * 0.30), None, None]
+
+
+def test_shot_cuts_on_kind_size_or_position_jump():
+    wide = Face(0.46, 0.06, 0.7, kind="person")
+    close = Face(0.56, 0.17, 0.8)
+    closer = Face(0.56, 0.33, 0.8)
+    assert shot_cuts([wide, close, close, None, close, closer]) == {1, 5}
+    assert shot_cuts([close, Face(0.6, 0.2, 0.8), None]) == set()  # normal movement
+    guest = Face(0.80, 0.17, 0.8)  # cut to the other speaker, same framing
+    assert shot_cuts([close, guest, close]) == {1, 2}
+
+
+def test_crop_snaps_at_a_shot_cut_instead_of_easing():
+    xs = [0.46, 0.56, 0.56, 0.56]
+    eased = smooth_path(xs)
+    assert eased[1] < 0.5  # without a cut, 0.10 is eased over several samples
+    assert smooth_path(xs, cuts={1}) == [0.46, 0.56, 0.56, 0.56]
+    crop = crop_path([0.46, 0.56], 1920, 1080, 1080, 1920, n_frames=12, fps=30, cuts={1})
+    first = round(0.46 * 1920 - 303)
+    assert crop.xs[:6] == [first] * 6  # held until the cut, not interpolated
+    assert crop.xs[6:] == [round(0.56 * 1920 - 303)] * 6
+
+
+@pytest.mark.parametrize(
+    ("cut_time", "old_frames"),
+    [
+        (0.29, 9),  # camera cut just after sample 1 (0.2 s): frames 0-8 (< 0.29 s) stay
+        (0.15, 5),  # camera cut before sample 1: switch early, at 0.15 s
+        (0.90, 6),  # no camera cut near sample 1: switch at the sample (0.2 s)
+    ],
+)
+def test_crop_switches_at_the_real_camera_cut(cut_time, old_frames):
+    old, new = round(0.46 * 1920 - 303), round(0.56 * 1920 - 303)
+    crop = crop_path([0.46, 0.56, 0.56], 1920, 1080, 1080, 1920, n_frames=15, fps=30,
+                     cuts={1}, cut_times=[cut_time])  # fmt: skip
+    assert crop.xs == [old] * old_frames + [new] * (15 - old_frames)
 
 
 def test_to_output_y_crop_and_fit():

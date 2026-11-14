@@ -207,12 +207,15 @@ def caption_events(
     px: float = 90,
     max_width: float = 1080 - 2 * CAPTION_MARGIN,
     linger: float = 0.2,
+    positions: list[tuple[int, int]] | None = None,
 ) -> list[tuple[float, float, str]]:
     """One (start, end, text) event per word: the whole chunk, that word yellow and
     enlarged. Each chunk pops in on its first event only. A chunk stays up `linger` s
-    after its last word, but never into the next chunk."""
+    after its last word, but never into the next chunk. `positions`: an (x, y) anchor
+    per chunk, written as \\an5\\pos."""
     events: list[tuple[float, float, str]] = []
     for ci, chunk in enumerate(chunks):
+        pos = f"\\an5\\pos({positions[ci][0]},{positions[ci][1]})" if positions else ""
         next_start = chunks[ci + 1][0].s if ci + 1 < len(chunks) else float("inf")
         chunk_end = max(chunk[-1].s, min(chunk[-1].e + linger, next_start))
         fit = chunk_fit(chunk, metrics, px, max_width)
@@ -231,8 +234,49 @@ def caption_events(
                 else display(x.w)
                 for k, x in enumerate(chunk)
             ]
-            events.append((w.s, end, f"{{{_scale(base, pop)}}}" + " ".join(parts)))
+            events.append((w.s, end, f"{{{pos}{_scale(base, pop)}}}" + " ".join(parts)))
     return events
+
+
+def caption_ys(
+    chunks: list[list[Word]],
+    face_bottoms: list[float | None] | None,
+    *,
+    default_y: float,
+    gap: float,
+    max_y: float,
+    sample_fps: float = 5,
+    deadband: float = 0,
+    step: float = math.inf,
+) -> list[int]:
+    """Caption anchor y per chunk: max(default_y, face bottom + gap) while the chunk is
+    on screen, clamped to max_y. `face_bottoms` are output px per sample (None = no face;
+    the last known position is held). Smoothed between chunks: changes under `deadband`
+    are ignored, moving down (to clear the face) is immediate, moving back up is limited
+    to `step` per chunk."""
+    held: list[float | None] = []
+    last: float | None = None
+    for b in face_bottoms or []:
+        last = b if b is not None else last
+        held.append(last)
+
+    ys: list[int] = []
+    prev: float | None = None
+    for chunk in chunks:
+        lo = max(0, math.floor(chunk[0].s * sample_fps))
+        hi = math.ceil(chunk[-1].e * sample_fps)
+        bottoms = [b for b in held[lo : hi + 1] if b is not None]
+        need = max([default_y] + [b + gap for b in bottoms])
+        need = min(need, max_y)
+        if prev is None or need > prev + deadband:
+            y = need
+        elif need < prev - deadband:
+            y = max(need, prev - step)
+        else:
+            y = prev
+        ys.append(round(y))
+        prev = y
+    return ys
 
 
 # --- hook -------------------------------------------------------------------------
@@ -341,7 +385,11 @@ class CaptionStyle:
     height: int = 1920
     font: str = "Montserrat Black"
     caption_px: float = 90
-    caption_y_frac: float = 0.66
+    caption_y_frac: float = 0.66  # default caption anchor
+    caption_face_gap: float = 0.04  # keep the anchor this far below the face bottom...
+    caption_max_y_frac: float = 0.78  # ...but never lower than this
+    caption_deadband: float = 0.02  # ignore position changes smaller than this
+    caption_step: float = 0.03  # move back up at most this much per chunk
     hook_style: HookStyle = "outline"
     hook_sec: float = 3.0
     hook_max_px: float = 150
@@ -390,9 +438,12 @@ def build_ass(
     style: CaptionStyle,
     metrics: FontMetrics = ESTIMATED,
     face_top: float | None = None,
+    face_bottoms: list[float | None] | None = None,
+    sample_fps: float = 5,
 ) -> str:
     """Full ASS file. `words` are caption words relative to the clip start (t=0);
-    `face_top` is the face's top edge in output pixels, if one was found."""
+    `face_top` is the face's top edge while the hook shows and `face_bottoms` its bottom
+    edge per sample (`sample_fps`), both in output pixels."""
     s = style
     clean = " ".join(hook_text.replace("{", "").replace("}", "").replace("\\", "").split())
     hook = layout_hook(
@@ -438,8 +489,21 @@ def build_ass(
             f"Dialogue: 0,{ass_time(0)},{ass_time(s.hook_sec)},Hook,,0,0,0,,"
             f"{tags}{hook_markup(hook.lines, s.hook_style)}\n"
         )
-    pos = f"{{\\an5\\pos({s.width // 2},{round(s.height * s.caption_y_frac)})}}"
+    chunks = chunk_words(words)
+    ys = caption_ys(
+        chunks,
+        face_bottoms,
+        default_y=s.height * s.caption_y_frac,
+        gap=s.height * s.caption_face_gap,
+        max_y=s.height * s.caption_max_y_frac,
+        sample_fps=sample_fps,
+        deadband=s.height * s.caption_deadband,
+        step=s.height * s.caption_step,
+    )
+    positions = [(s.width // 2, y) for y in ys]
     max_width = s.width - 2 * CAPTION_MARGIN
-    for start, end, text in caption_events(chunk_words(words), metrics, s.caption_px, max_width):
-        lines.append(f"Dialogue: 1,{ass_time(start)},{ass_time(end)},Caption,,0,0,0,,{pos}{text}\n")
+    for start, end, text in caption_events(
+        chunks, metrics, s.caption_px, max_width, positions=positions
+    ):
+        lines.append(f"Dialogue: 1,{ass_time(start)},{ass_time(end)},Caption,,0,0,0,,{text}\n")
     return "".join(lines)
