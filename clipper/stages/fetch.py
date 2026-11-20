@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -88,28 +89,65 @@ def fetch_audio(cfg: Config, meta: VideoMeta) -> Path:
     return wav
 
 
+SEGMENT_MIN_FRACTION = 0.8  # a segment shorter than this share of the clip is broken
+
+
+def segment_problem(path: Path, expected_sec: float) -> str | None:
+    """Why a downloaded segment is unusable (no video, no audio, cut short), or None.
+    yt-dlp's section downloads occasionally produce such files."""
+    proc = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type:format=duration",
+         "-of", "json", str(path)], capture_output=True, text=True, check=False,
+    )  # fmt: skip
+    try:
+        info = json.loads(proc.stdout or "{}")
+    except ValueError:
+        info = {}
+    kinds = {s.get("codec_type") for s in info.get("streams", [])}
+    if "video" not in kinds:
+        return "no video stream"
+    if "audio" not in kinds:
+        return "no audio stream"
+    duration = float((info.get("format") or {}).get("duration") or 0)
+    if duration < expected_sec * SEGMENT_MIN_FRACTION:
+        return f"only {duration:.1f} s of {expected_sec:.1f} s"
+    return None
+
+
 def fetch_segment(cfg: Config, meta: VideoMeta, index: int, start: float, end: float) -> Path:
-    """Download only [start, end] of the video (max 1080p mp4). Skips if present."""
+    """Download only [start, end] of the video (max 1080p mp4). A segment already on disk
+    is reused only if it checks out; a broken download is retried once."""
     sources = cfg.dir("sources")
     out = sources / f"{meta.id}_{index:02d}.mp4"
-    if out.exists() and out.stat().st_size > 0:
-        log.info("segment already present: %s", out.name)
-        return out
+    if out.exists():
+        problem = segment_problem(out, end - start)
+        if problem is None:
+            log.info("segment already present: %s", out.name)
+            return out
+        log.warning("discarding broken segment %s (%s)", out.name, problem)
+        out.unlink()
     ensure_free_space(sources, cfg.machine.min_free_gb, (end - start) * SEGMENT_GB_PER_SEC)
 
-    log.info("downloading segment %s %.2f-%.2f", out.name, start, end)
     tmp = sources / f"{meta.id}_{index:02d}.tmp.mp4"
+    problem = ""
+    for attempt in (1, 2):
+        log.info("downloading segment %s %.2f-%.2f", out.name, start, end)
+        tmp.unlink(missing_ok=True)
+        ytdlp(
+            "--no-playlist",
+            "-f", "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080]/b",
+            "--merge-output-format", "mp4",
+            "--download-sections", f"*{start:.3f}-{end:.3f}",
+            "--force-keyframes-at-cuts",  # frame-accurate, so captions stay in sync
+            "-o", str(tmp),
+            meta.url,
+        )  # fmt: skip
+        if not tmp.exists():
+            raise RuntimeError(f"yt-dlp finished but {tmp} is missing")
+        problem = segment_problem(tmp, end - start) or ""
+        if not problem:
+            tmp.replace(out)
+            return out
+        log.warning("segment %s is broken (%s), try %d of 2", out.name, problem, attempt)
     tmp.unlink(missing_ok=True)
-    ytdlp(
-        "--no-playlist",
-        "-f", "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080]/b",
-        "--merge-output-format", "mp4",
-        "--download-sections", f"*{start:.3f}-{end:.3f}",
-        "--force-keyframes-at-cuts",  # frame-accurate, so captions stay in sync
-        "-o", str(tmp),
-        meta.url,
-    )  # fmt: skip
-    if not tmp.exists():
-        raise RuntimeError(f"yt-dlp finished but {tmp} is missing")
-    tmp.replace(out)
-    return out
+    raise RuntimeError(f"segment {out.name} keeps coming out broken: {problem}")

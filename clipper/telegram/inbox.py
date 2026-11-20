@@ -49,7 +49,10 @@ LABELS = {
 }
 NO_BUTTONS: dict[str, Any] = {"inline_keyboard": []}
 HELP = (
-    "Clips arrive here when they are rendered.\n"
+    "Runs: <b>▶️ Start</b> / <b>⏹ Stop</b> on the pinned panel, or /run (all new videos, "
+    "one by one), /run &lt;youtube url&gt;, /run &lt;n videos&gt;, /stop (after the current "
+    "clip), /stop now, /panel (show the panel again).\n"
+    "Clips arrive here as soon as each one is rendered.\n"
     "• <b>✅ Done</b> after posting: then reply with the post links.\n"
     "• <b>❌ Reject</b> deletes the clip.\n"
     "• <b>🔁 Framed / Crop / Fit</b> re-renders it in that layout on the next run.\n"
@@ -376,6 +379,10 @@ def handle_update(ix: Inbox, update: dict[str, Any]) -> None:
 
 def on_button(ix: Inbox, data: str) -> str:
     action, _, clip_id = data.partition(":")
+    if action == "ctl":  # control panel (PLAN.md §17)
+        from clipper.telegram import control
+
+        return control.on_button(ix, clip_id)
     row = db.get_clip(ix.conn, clip_id)
     if row is None:
         return "Unknown clip"
@@ -527,7 +534,9 @@ def on_stats_command(ix: Inbox, command: str, args: list[str]) -> bool:
 
 
 def on_command(ix: Inbox, command: str, args: list[str] | None = None) -> None:
-    if on_stats_command(ix, command, args or []):
+    from clipper.telegram import control  # imports this module
+
+    if on_stats_command(ix, command, args or []) or control.on_command(ix, command, args or []):
         return
     if command == "/start":
         ix.say("✅ This chat is linked. New clips will arrive here.\n\n" + HELP)
@@ -535,6 +544,7 @@ def on_command(ix: Inbox, command: str, args: list[str] | None = None) -> None:
         ix.say(HELP)
     elif command == "/status":
         ix.say(f"<pre>{html.escape(report(ix.conn))[: MESSAGE_LIMIT - 20]}</pre>")
+        control.refresh_panel(ix, repost=True)  # the run status, at the bottom of the chat
     elif command == "/pending":
         rows = db.clips_in(ix.conn, "delivered")
         if not rows:

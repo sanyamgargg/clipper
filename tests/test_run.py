@@ -5,7 +5,7 @@ from collections import Counter
 
 import pytest
 
-from clipper import db, run
+from clipper import db, run, runstate
 from clipper import status as status_mod
 from clipper.config import Campaign, Config, Machine
 from clipper.llm.claude_cli import ClaudeCLIError, LLMResult
@@ -108,7 +108,7 @@ def statuses(conn) -> dict[str, str]:
 
 
 def go(cfg, conn) -> int:
-    return run.run_pipeline(cfg, conn, discover_new=False)
+    return run.run_pipeline(cfg, conn)
 
 
 def test_full_run_takes_videos_to_done_and_deletes_sources(cfg, conn, fakes):
@@ -305,3 +305,144 @@ def test_status_report_shows_counts_and_month_cost(cfg, conn, fakes):
     assert "v3: RuntimeError: boom" in lines
     assert not any(line.startswith("long ") for line in lines)
     assert lines[-1].endswith("2 calls (0 failed), 17,000 in / 3,000 out tokens, $0.12")
+
+
+# --- continuous on-demand runs (PLAN.md §17) ------------------------------------------
+
+
+class FakeInbox:
+    def __init__(self, conn) -> None:
+        self.conn = conn
+        self.said: list[str] = []
+        self.sent: list[str] = []
+
+    def say(self, text, **extra):
+        self.said.append(text)
+        return {"message_id": 1}
+
+
+@pytest.fixture
+def inbox(monkeypatch, conn):
+    box = FakeInbox(conn)
+    monkeypatch.setattr(run, "open_inbox", lambda cfg, conn: box)
+    monkeypatch.setattr(run, "lock_held", lambda *a: True)  # the bot is polling, not the run
+
+    def send(ix, row):
+        box.sent.append(row["id"])
+        db.update_clip(conn, row["id"], status="delivered")
+
+    monkeypatch.setattr(run, "send_clip", send)
+    monkeypatch.setattr(run, "deliver", lambda ix, limit: (0, 0))
+    return box
+
+
+class Source:
+    """discover_next stand-in: hands out videos one by one."""
+
+    def __init__(self, conn, ids) -> None:
+        self.conn, self.ids, self.calls = conn, list(ids), 0
+
+    def __call__(self, cfg, conn):
+        self.calls += 1
+        if not self.ids:
+            return None
+        vid = self.ids.pop(0)
+        db.add_video(conn, vid, "tjr", f"https://x/{vid}", vid, 600, "20261101")
+        return vid
+
+
+def test_continuous_run_goes_video_by_video_and_delivers_each_clip_at_once(
+    cfg, conn, fakes, inbox, monkeypatch
+):
+    order = []
+    real_send = run.send_clip
+
+    def send(ix, row):
+        order.append(("send", row["id"], fakes.calls["render"]))
+        real_send(ix, row)
+
+    monkeypatch.setattr(run, "send_clip", send)
+    source = Source(conn, ["v1", "v2"])
+    assert run.run_continuous(cfg, conn, next_video=source) == run.EXIT_OK
+    # each clip is sent right after it is rendered, before the next one renders
+    assert order == [("send", "v1_01", 1), ("send", "v1_02", 2), ("send", "v2_01", 3),
+                     ("send", "v2_02", 4)]  # fmt: skip
+    assert statuses(conn) == {"v1": "done", "v2": "done"}
+    status = runstate.read_status(cfg.data_dir)
+    assert (status["state"], status["reason"], status["videos_done"], status["clips"]) == (
+        "finished", "no new videos left", 2, 4)  # fmt: skip
+    assert "✅ 2 clip(s) from <b>v1</b>" in inbox.said
+    assert inbox.said[-1].startswith("⏹ Run finished: no new videos left · 2 video(s), 4 clip(s)")
+
+
+def test_continuous_run_stops_at_the_video_cap(cfg, conn, fakes, inbox):
+    source = Source(conn, ["v1", "v2", "v3"])
+    run.run_continuous(cfg, conn, max_videos=2, next_video=source)
+    assert statuses(conn) == {"v1": "done", "v2": "done"}
+    assert runstate.read_status(cfg.data_dir)["reason"] == "reached the limit of 2 video(s)"
+
+
+def test_graceful_stop_finishes_the_clip_delivers_it_and_exits(cfg, conn, fakes, inbox,
+                                                               monkeypatch):  # fmt: skip
+    real_render = fakes.render_clip
+
+    def render_then_stop(cfg_, clip, *a):
+        out = real_render(cfg_, clip, *a)
+        if clip.id == "v1_01" and fakes.calls["render"] == 1:
+            runstate.request_stop(cfg.data_dir)  # Stop pressed while the first clip renders
+        return out
+
+    monkeypatch.setattr(run, "render_clip", render_then_stop)
+    source = Source(conn, ["v1", "v2"])
+    run.run_continuous(cfg, conn, next_video=source)
+    assert inbox.sent == ["v1_01"]  # the clip being rendered is still delivered
+    assert db.get_clip(conn, "v1_02")["status"] == "picked"  # the rest waits
+    assert statuses(conn) == {"v1": "picked"} and source.calls == 1  # no next video
+    assert runstate.read_status(cfg.data_dir)["reason"] == "stopped by you"
+    assert not runstate.stop_requested(cfg.data_dir)  # cleared for the next Start
+    # the next Start resumes the same video before looking for new ones
+    run.run_continuous(cfg, conn, next_video=source)
+    assert inbox.sent == ["v1_01", "v1_02", "v2_01", "v2_02"]
+
+
+def test_stop_between_stages(cfg, conn, fakes, inbox, monkeypatch):
+    real = fakes.transcribe
+
+    def transcribe_then_stop(*a, **k):
+        out = real(*a, **k)
+        runstate.request_stop(cfg.data_dir)
+        return out
+
+    monkeypatch.setattr(run, "transcribe", transcribe_then_stop)
+    run.run_continuous(cfg, conn, next_video=Source(conn, ["v1"]))
+    assert statuses(conn) == {"v1": "transcribed"} and fakes.calls["pick"] == 0
+
+
+def test_claude_failure_ends_the_run_with_exit_2(cfg, conn, fakes, inbox):
+    fakes.claude_down = True
+    code = run.run_continuous(cfg, conn, next_video=Source(conn, ["v1", "v2"]))
+    assert code == run.EXIT_CLAUDE and statuses(conn) == {"v1": "transcribed"}
+    assert "claude -p failed" in runstate.read_status(cfg.data_dir)["reason"]
+
+
+def test_a_failed_video_does_not_stop_the_run(cfg, conn, fakes, inbox, monkeypatch):
+    real = fakes.fetch_audio
+
+    def flaky(cfg_, meta):
+        if meta.id == "v1":
+            raise RuntimeError("HTTP Error 403")
+        return real(cfg_, meta)
+
+    monkeypatch.setattr(run, "fetch_audio", flaky)
+    run.run_continuous(cfg, conn, next_video=Source(conn, ["v1", "v2"]))
+    assert statuses(conn) == {"v1": "failed", "v2": "done"}
+    assert any(s.startswith("⚠️ No clips from <b>v1</b>: RuntimeError: HTTP Error 403")
+               for s in inbox.said)  # fmt: skip
+
+
+def test_url_run_does_only_that_video(cfg, conn, fakes, inbox):
+    add_two(conn)
+    source = Source(conn, ["v9"])
+    run.run_continuous(cfg, conn, only_video="v2", next_video=source)
+    assert statuses(conn) == {"v1": "new", "v2": "done"} and source.calls == 0
+    assert runstate.read_status(cfg.data_dir)["reason"] == "that video is done"

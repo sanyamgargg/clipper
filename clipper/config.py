@@ -20,7 +20,9 @@ class Machine(BaseModel):
 
 
 class Pipeline(BaseModel):
-    videos_per_night: int = 2
+    # runs are started from Telegram and go video by video until stopped (PLAN.md §17)
+    max_videos_per_run: int = 6
+    max_age_days: float = 30  # backlog videos older than this are not picked up
     max_source_minutes: float = 120  # longer videos are skipped (status skipped_too_long)
     max_retries: int = 3  # a failed video/clip is retried on up to this many later runs
     candidates_per_video: int = 5

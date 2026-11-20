@@ -348,7 +348,9 @@ def test_other_chats_are_ignored(ix):
 
 def test_commands(ix):
     send_text(ix, "/status")
-    assert ix.api.last("sendMessage")["text"].startswith("<pre>VIDEOS BY STATUS")
+    texts = [p["text"] for m, p, _ in ix.api.calls if m == "sendMessage"]
+    assert texts[-2].startswith("<pre>VIDEOS BY STATUS")
+    assert texts[-1].startswith("🎬 <b>Clipper — Idle</b>")  # then the run panel
     send_text(ix, "/pending")
     assert ix.api.last("sendMessage")["text"] == "Nothing waiting. 🎉"
     ib.deliver(ix, limit=2)

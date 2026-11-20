@@ -3,13 +3,14 @@
 import os
 import subprocess
 import sys
+from datetime import date
 
 import pytest
 
 from clipper import db, proc
 from clipper.config import Campaign, Config, Machine, Pipeline
 from clipper.stages import discover as discover_mod
-from clipper.stages.discover import Candidate, newest, shortlist
+from clipper.stages.discover import Candidate, frontier, too_old
 from clipper.stages.fetch import VideoMeta
 
 
@@ -159,37 +160,22 @@ def test_migration_adds_columns_to_an_m1_database(tmp_path):
     conn.close()
 
 
-# --- discovery: skip and newest-first ------------------------------------------
+# --- discovery: newest unseen first, then the backlog -----------------------------------
 
 
-def test_shortlist_skips_known_ids_and_stops_at_limit():
-    entries = [cand("a"), cand("b"), cand("c"), cand("d")]
-    usable, too_long = shortlist(entries, known={"a"}, limit=2, max_minutes=120)
-    assert [c.id for c in usable] == ["b", "c"]
-    assert too_long == []
+def test_frontier_skips_known_and_sets_aside_long_ones():
+    entries = [cand("a"), cand("long", 121), cand("edge", 120), cand("later")]
+    front, too_long = frontier(entries, known={"a"}, max_minutes=120)
+    assert front.id == "edge"  # exactly 120 min is allowed
+    assert [c.id for c in too_long] == ["long"]  # never looked past the frontier
+    assert frontier([cand("a")], {"a"}, 120) == (None, [])
 
 
-def test_shortlist_sets_aside_videos_over_the_limit():
-    entries = [cand("long", 121), cand("edge", 120), cand("ok", 30), cand("later-long", 500)]
-    usable, too_long = shortlist(entries, known=set(), limit=2, max_minutes=120)
-    assert [c.id for c in usable] == ["edge", "ok"]  # exactly 120 min is allowed
-    assert [c.id for c in too_long] == ["long"]  # never looked past the 2 usable ones
-
-
-def test_shortlist_ignores_duplicate_entries():
-    usable, _ = shortlist([cand("a"), cand("a"), cand("b")], set(), 5, 120)
-    assert [c.id for c in usable] == ["a", "b"]
-
-
-def test_newest_sorts_by_upload_date_across_campaigns():
-    cands = [
-        cand("old", date="20240205", campaign="a"),
-        cand("newest", date="20261112", campaign="b"),
-        cand("undated", campaign="a"),
-        cand("mid", date="20261108", campaign="a"),
-    ]
-    assert [c.id for c in newest(cands, 2)] == ["newest", "mid"]
-    assert [c.id for c in newest(cands, 9)][-1] == "undated"
+def test_too_old():
+    today = date(2026, 11, 20)
+    assert not too_old("20261021", 30, today)  # exactly 30 days
+    assert too_old("20261020", 30, today)
+    assert not too_old("", 30, today)  # unknown date: allowed
 
 
 def make_cfg(tmp_path, **pipeline) -> Config:
@@ -203,18 +189,13 @@ def make_cfg(tmp_path, **pipeline) -> Config:
     )
 
 
+TODAY = date(2026, 11, 20)
 LISTINGS = {
-    "src-a": [cand("a1"), cand("a-long", 300), cand("a2"), cand("a3")],
+    "src-a": [cand("a1"), cand("a-long", 300), cand("a2"), cand("a3"), cand("a-old")],
     "src-b": [cand("b1"), cand("b2")],
 }
-DATES = {
-    "a-long": "20250101",
-    "a1": "20261101",
-    "a2": "20261001",
-    "a3": "20260901",
-    "b1": "20261110",
-    "b2": "20261105",
-}
+DATES = {"a-long": "20261115", "a1": "20261101", "a2": "20261025", "a3": "20261022",
+         "a-old": "20260901", "b1": "20261110", "b2": "20261030"}  # fmt: skip
 
 
 @pytest.fixture
@@ -231,33 +212,38 @@ def fake_youtube(monkeypatch):
     return probed
 
 
-def test_discover_takes_newest_across_sources_and_marks_long_ones(conn, tmp_path, fake_youtube):
-    add(conn, "a1", "done")  # already processed
-    assert discover_mod.discover(make_cfg(tmp_path), conn) == 2
-    assert [r["id"] for r in db.videos_in(conn, "new")] == ["b1", "b2"]  # newer than a2, a3
+def test_discover_next_goes_newest_first_then_into_the_backlog(conn, tmp_path, fake_youtube):
+    cfg = make_cfg(tmp_path)
+    order = []
+    while (vid := discover_mod.discover_next(cfg, conn, TODAY)) is not None:
+        order.append(vid)
+        db.advance_video(conn, vid)  # pretend it was clipped
+    # newest across sources each time; a-old (80 days) is past max_age_days: never taken
+    assert order == ["b1", "a1", "b2", "a2", "a3"]
     assert status(conn, "a-long") == db.SKIPPED_TOO_LONG
-    assert db.get_video(conn, "a2") is None  # not chosen, stays unknown for another night
+    assert db.get_video(conn, "a-old") is None
     assert db.get_video(conn, "b1")["upload_date"] == "20261110"
-    assert sorted(fake_youtube) == ["a2", "a3", "b1", "b2"]  # only the shortlist is probed
+    assert "src-off" not in str(fake_youtube)  # inactive campaign never listed
 
 
-def test_discover_respects_max_source_minutes_setting(conn, tmp_path, fake_youtube):
-    discover_mod.discover(make_cfg(tmp_path, max_source_minutes=400), conn)
-    assert db.get_video(conn, "a-long") is None  # usable now, just not among the newest
+def test_discover_next_probes_only_each_sources_frontier(conn, tmp_path, fake_youtube):
+    assert discover_mod.discover_next(make_cfg(tmp_path), conn, TODAY) == "b1"
+    assert sorted(fake_youtube) == ["a1", "b1"]
+
+
+def test_discover_next_respects_max_source_minutes(conn, tmp_path, fake_youtube):
+    cfg = make_cfg(tmp_path, max_source_minutes=400)
+    add(conn, "b1", "done")
+    add(conn, "b2", "done")
+    assert discover_mod.discover_next(cfg, conn, TODAY) == "a1"
+    add(conn, "a1", "done")
+    assert discover_mod.discover_next(cfg, conn, TODAY) == "a-long"  # short enough now
     assert not db.videos_in(conn, db.SKIPPED_TOO_LONG)
 
 
-def test_discover_adds_nothing_while_videos_are_in_progress(conn, tmp_path, fake_youtube):
-    add(conn, "x1", "audio_downloaded")
-    add(conn, "x2", "transcribed")
-    assert discover_mod.discover(make_cfg(tmp_path), conn) == 0
-    assert fake_youtube == []
-    db.advance_video(conn, "x2")  # still in progress (picked)
-    for _ in range(4):  # x1 runs out of retries: it no longer holds a slot
-        db.fail_video(conn, "x1", "boom")
-        db.requeue_failed(conn, 3)
-    assert discover_mod.discover(make_cfg(tmp_path), conn) == 1
-    assert [r["id"] for r in db.videos_in(conn, "new")] == ["b1"]
+def test_discover_next_none_when_everything_is_too_old(conn, tmp_path, fake_youtube):
+    assert discover_mod.discover_next(make_cfg(tmp_path, max_age_days=1), conn, TODAY) is None
+    assert db.videos_in(conn, "new") == []
 
 
 # --- run lock --------------------------------------------------------------------

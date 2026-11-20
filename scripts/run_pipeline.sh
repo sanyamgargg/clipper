@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Nightly pipeline run. Started by launchd (com.sanyam.clipper, 01:30); also fine by hand.
-#   scripts/run_nightly.sh           run the pipeline under caffeinate -i
-#   scripts/run_nightly.sh --check   check tools, Claude token and login; no pipeline run
+# One pipeline run. Started by the Telegram bot (▶️ Start / /run, PLAN.md §17); also fine
+# by hand. Arguments go to `python -m clipper.run` (e.g. --url <video>, --max-videos 2).
+#   scripts/run_pipeline.sh [args]    run the pipeline under caffeinate -i
+#   scripts/run_pipeline.sh --check   check tools, Claude token and login; no pipeline run
 #
 # Claude auth: the long-lived token from `claude setup-token`, stored in the Keychain
 # (service = claude.keychain_service in config.yaml), is exported as
@@ -12,7 +13,8 @@ cd "$(dirname "$0")/.."
 ROOT="$PWD"
 VPY="$ROOT/.venv/bin/python"
 
-# launchd starts jobs with a minimal PATH; claude lives in ~/.local/bin, the rest in Homebrew
+# launchd (and the bot it runs) has a minimal PATH; claude lives in ~/.local/bin, the rest
+# in Homebrew
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 unset ANTHROPIC_API_KEY # would make claude bill the API instead of the subscription
 
@@ -28,10 +30,10 @@ CHECK=0
 
 LOG_DIR="$(cfg logs)"
 if [[ $CHECK -eq 0 && ! -t 1 ]]; then
-  # under launchd: one log file per night
-  exec >>"$LOG_DIR/nightly-$(date +%F).log" 2>&1
+  # started by the bot (no terminal): one log file per day
+  exec >>"$LOG_DIR/pipeline-$(date +%F).log" 2>&1
 fi
-echo "=== $(date '+%F %T') run_nightly.sh ${1:-}"
+echo "=== $(date '+%F %T') run_pipeline.sh $*"
 
 SERVICE="$(cfg service)"
 if TOKEN="$(security find-generic-password -s "$SERVICE" -w 2>/dev/null)" && [[ -n "$TOKEN" ]]; then
@@ -66,4 +68,4 @@ if [[ $CHECK -eq 1 ]]; then
   exit $fail
 fi
 
-exec caffeinate -i "$VPY" -m clipper.run
+exec caffeinate -i "$VPY" -m clipper.run "$@"

@@ -22,6 +22,7 @@ from clipper import db
 from clipper.analytics.core import tick as analytics_tick
 from clipper.config import REPO_ROOT, load_config
 from clipper.proc import AlreadyRunning, run_lock
+from clipper.telegram import control
 from clipper.telegram.api import BotAPI, TelegramError, get_token
 from clipper.telegram.inbox import (
     BOT_LOCK,
@@ -39,6 +40,7 @@ from clipper.telegram.inbox import (
 log = logging.getLogger("clipper.telegram")
 
 LONG_POLL_SEC = 50
+RUNNING_POLL_SEC = 10  # while a run is going: panel updates at least this often
 
 
 def link(config_path: Path) -> int:
@@ -77,14 +79,26 @@ def maybe_tick(ix: Inbox, last: float, clock: Callable[[], float] = time.monoton
     return clock()
 
 
+def keep_panel(ix: Inbox) -> int:
+    """Collect a finished run and bring the control panel up to date. Returns the long
+    poll timeout: short while a run is going, so the panel follows it closely."""
+    try:
+        control.reap(ix)
+        control.refresh_panel(ix)
+    except TelegramError as exc:
+        log.warning("control panel: %s", exc)
+    return RUNNING_POLL_SEC if control.run_active(ix.cfg) else LONG_POLL_SEC
+
+
 def run_bot(ix: Inbox) -> int:
     log.info("bot polling (Ctrl-C to stop)")
     backoff = 5.0
     last_tick = float("-inf")
     while True:
         last_tick = maybe_tick(ix, last_tick)
+        timeout = keep_panel(ix)
         try:
-            poll(ix, LONG_POLL_SEC)
+            poll(ix, timeout)
             backoff = 5.0
         except TelegramError as exc:
             if exc.code == 409:  # another getUpdates (e.g. a pipeline run) is polling
