@@ -19,6 +19,8 @@ from typing import Any, Protocol
 from urllib.parse import urlparse
 
 from clipper import db, post_text, proc
+from clipper.analytics import core as analytics
+from clipper.analytics import reports
 from clipper.config import Campaign, Config
 from clipper.render.ffmpeg import encoder_args, probe_video
 from clipper.stages.pick import Clip, load_clips, save_clips
@@ -52,7 +54,10 @@ HELP = (
     "• <b>❌ Reject</b> deletes the clip.\n"
     "• <b>🔁 Framed / Crop / Fit</b> re-renders it in that layout on the next run.\n"
     "• Reply to a clip with its post links at any time.\n"
-    "/pending: clips waiting  ·  /status: pipeline status and Claude cost"
+    "/pending: clips waiting  ·  /status: pipeline status and Claude cost\n"
+    "/stats: last 7 days  ·  /clip &lt;id&gt;: one clip's numbers\n"
+    "/views &lt;link or clip id&gt; &lt;n&gt;: Instagram views from the app\n"
+    "/approved &lt;link&gt;  ·  /paid &lt;link&gt; &lt;usd&gt;: Content Rewards results"
 )
 
 
@@ -361,7 +366,8 @@ def handle_update(ix: Inbox, update: dict[str, Any]) -> None:
         return
     text = message.get("text") or message.get("caption") or ""
     if text.startswith("/"):
-        on_command(ix, text.split()[0].split("@")[0].lower())
+        command, *args = text.split()
+        on_command(ix, command.split("@")[0].lower(), args)
     elif urls := find_urls(text):
         on_links(ix, message, urls)
     else:
@@ -466,7 +472,63 @@ def on_links(ix: Inbox, message: dict[str, Any], urls: list[str]) -> None:
         ix.say(f"Those links are already saved for <b>{title}</b>.")
 
 
-def on_command(ix: Inbox, command: str) -> None:
+def on_stats_command(ix: Inbox, command: str, args: list[str]) -> bool:
+    """/stats, /clip, /views, /approved, /paid (PLAN.md §15). False if not one of them."""
+    now = datetime.now(UTC)
+    if command == "/stats":
+        ix.say(reports.stats_summary(ix.cfg, ix.conn, now))
+        return True
+    if command == "/clip":
+        ix.say(
+            reports.clip_summary(ix.cfg, ix.conn, args[0])
+            if args
+            else "Usage: /clip &lt;clip id&gt;"
+        )
+        return True
+    if command not in ("/views", "/approved", "/paid"):
+        return False
+    need = 1 if command == "/approved" else 2
+    usage = {"/views": "/views &lt;post link or clip id&gt; &lt;views, e.g. 12345 or 12.3k&gt;",
+             "/approved": "/approved &lt;post link&gt;",
+             "/paid": "/paid &lt;post link&gt; &lt;usd&gt;"}[command]  # fmt: skip
+    if len(args) < need:
+        ix.say(f"Usage: {usage}")
+        return True
+    post = analytics.find_post(ix.conn, args[0])
+    if post is None:
+        ix.say(f"No recorded post matches {html.escape(args[0])}. Reply to the clip with its link "
+               "first.")  # fmt: skip
+        return True
+    title = html.escape((db.get_clip(ix.conn, post["clip_id"]) or {"title": None})["title"]
+                        or post["clip_id"])  # fmt: skip
+    label = LABELS.get(post["platform"], post["platform"])
+    if command == "/approved":
+        ix.conn.execute("UPDATE posts SET approved = 1 WHERE id = ?", (post["id"],))
+        ix.say(f"✅ Approved: <b>{title}</b> ({label})")
+        return True
+    if command == "/paid":
+        try:
+            usd = float(args[1].lstrip("$").replace(",", ""))
+        except ValueError:
+            ix.say(f"Usage: {usage}")
+            return True
+        ix.conn.execute("UPDATE posts SET paid_usd = ? WHERE id = ?", (usd, post["id"]))
+        ix.say(f"💵 Paid ${usd:,.2f}: <b>{title}</b> ({label})")
+        return True
+    views = analytics.parse_count(args[1])
+    if views is None:
+        ix.say(f"Usage: {usage}")
+        return True
+    alert = analytics.record_views(ix.cfg, ix.conn, post, views, now, "manual")
+    ix.say(f"Saved {views:,} views for <b>{title}</b> ({label}).")
+    if alert:
+        ix.say(reports.mvr_alert_text(alert))
+    return True
+
+
+def on_command(ix: Inbox, command: str, args: list[str] | None = None) -> None:
+    if on_stats_command(ix, command, args or []):
+        return
     if command == "/start":
         ix.say("✅ This chat is linked. New clips will arrive here.\n\n" + HELP)
     elif command == "/help":

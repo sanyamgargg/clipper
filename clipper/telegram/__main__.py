@@ -14,10 +14,12 @@ import logging
 import signal
 import sys
 import time
+from collections.abc import Callable
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from clipper import db
+from clipper.analytics.core import tick as analytics_tick
 from clipper.config import REPO_ROOT, load_config
 from clipper.proc import AlreadyRunning, run_lock
 from clipper.telegram.api import BotAPI, TelegramError, get_token
@@ -65,10 +67,22 @@ def link(config_path: Path) -> int:
     return 0
 
 
+def maybe_tick(ix: Inbox, last: float, clock: Callable[[], float] = time.monotonic) -> float:
+    """Run the analytics tick (YouTube views, MVR alerts, digests) every
+    analytics.tick_minutes; returns the time of the last tick."""
+    a = ix.cfg.analytics
+    if not a.enabled or clock() - last < a.tick_minutes * 60:
+        return last
+    analytics_tick(ix.cfg, ix.conn, ix.say)  # never raises
+    return clock()
+
+
 def run_bot(ix: Inbox) -> int:
     log.info("bot polling (Ctrl-C to stop)")
     backoff = 5.0
+    last_tick = float("-inf")
     while True:
+        last_tick = maybe_tick(ix, last_tick)
         try:
             poll(ix, LONG_POLL_SEC)
             backoff = 5.0

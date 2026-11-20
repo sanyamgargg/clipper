@@ -103,6 +103,18 @@ class CampaignCaptions(BaseModel):
     caption_footer: str | None = None  # None: use captions.caption_footer
 
 
+class Analytics(BaseModel):
+    """M5 lite (PLAN.md §15): YouTube views via an API key, Instagram views via /views."""
+
+    enabled: bool = True
+    youtube_keychain_service: str = "clipper-youtube-key"  # env CLIPPER_YOUTUBE_KEY wins
+    timezone: str = "Asia/Kolkata"
+    digest_time: str = "09:00"  # daily digest, local time
+    weekly_day: int = 0  # weekly report on Monday (0) at digest_time
+    stop_after_days: float = 45  # posts older than this are no longer polled
+    tick_minutes: float = 10  # how often the bot process checks what is due
+
+
 class Rules(BaseModel):
     # Campaigns add their own fields (mvr_views, submit_within_minutes, ...): keep them.
     model_config = ConfigDict(extra="allow")
@@ -131,6 +143,18 @@ class Campaign(BaseModel):
     captions: CampaignCaptions = Field(default_factory=CampaignCaptions)
     active: bool = True
 
+    @property
+    def mvr_views(self) -> int:
+        """Views a post needs before it earns (campaign `mvr_views`, or rules.mvr_views)."""
+        value = (self.model_extra or {}).get("mvr_views")
+        value = value if value is not None else (self.rules.model_extra or {}).get("mvr_views")
+        return int(value or 0)
+
+    @property
+    def max_payout_usd(self) -> float | None:
+        value = (self.model_extra or {}).get("max_payout_usd")
+        return float(value) if value else None
+
 
 class Config(BaseModel):
     machine: Machine = Field(default_factory=Machine)
@@ -140,6 +164,7 @@ class Config(BaseModel):
     claude: Claude = Field(default_factory=Claude)
     campaigns: list[Campaign] = Field(default_factory=list)
     captions: Captions = Field(default_factory=Captions)
+    analytics: Analytics = Field(default_factory=Analytics)
 
     @property
     def data_dir(self) -> Path:

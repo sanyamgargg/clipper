@@ -199,7 +199,7 @@ llm_calls(id INTEGER PK, video_id, model, input_tokens, output_tokens, cost_usd,
 | M1 | One video end-to-end (CLI) | `python -m clipper.run --url <video>` produces 3–5 good clips in `data/clips/` |
 | M2 | Batch + DB + resumable | Pipeline processes 2 videos from config, survives a kill mid-run |
 | M3 | Clip inbox (Telegram) | Rendered clips arrive in a private Telegram chat with tap-to-copy caption; Done/Reject/links recorded (see §14) |
-| M4 | Nightly schedule | launchd runs it unattended for 3 nights in a row |
+| M4 | Nightly schedule | launchd runs it unattended for 3 nights in a row — replaced by on-demand runs from Telegram (see §17) |
 | M5 | Analytics (lite) | YouTube views via API key, Instagram views via /views in Telegram, MVR alerts, daily + weekly reports (see §15) |
 | M6 | ~~Publishing automation~~ | Dropped 2026-11-20: posting stays manual (see §16) |
 
@@ -351,3 +351,50 @@ YouTube title with #shorts), then replies with the post links and submits them o
   `videos.insert`, token storage for those), and the related config (`accounts`, `publish.enabled_platforms`,
   `publish.slots_ist`, `publish.youtube_audited`). Keep `publish.default_hashtags` and `publish.caption_footer`
   (or move them under `captions:`), since the Telegram caption uses them.
+
+## 17. On-demand runs from Telegram (replaces the nightly schedule)
+
+Decision (2026-11-20): the pipeline runs only when Sanyam starts it from Telegram and keeps producing clips until
+he stops it (or there is nothing left / a cap is hit). The Telegram bot agent keeps running as today.
+
+### Controls
+- A pinned **control panel** message in the bot chat with inline buttons: `▶️ Start`, `⏹ Stop`, `📊 Status`.
+  The bot edits it live: `Idle` / `Running — video 2/…, 7 clips so far, $0.18 Claude` / `Stopping…`.
+- Commands (same actions): `/run` (start), `/run <youtube_url>` (clip just that video), `/run <n>` (stop after
+  n source videos), `/stop` (graceful), `/stop now` (immediate), `/status`.
+  Do not reuse Telegram's `/start` (it is the bot's linking command).
+- Only the configured chat id can control the pipeline.
+
+### Behaviour while running
+- Start = launch the pipeline as a detached child of the bot through `scripts/run_nightly.sh` (rename to
+  `scripts/run_pipeline.sh`; it loads the Claude token and runs under `caffeinate -i`). Only one run at a time
+  (existing lock); `▶️ Start` while running just shows the status.
+- **Continuous mode:** process one source video at a time: newest unseen first across active campaigns, then
+  older backlog videos (not older than `pipeline.max_age_days`, default 30). Clips are delivered to Telegram as
+  soon as each one is rendered (not at the end of the run).
+- Stops when: `/stop` was pressed, no unseen videos are left, `pipeline.max_videos_per_run` (default 6) reached,
+  Claude credit/exit code 2, or disk below `machine.min_free_gb`. Each stop reason is reported in Telegram.
+- **Graceful stop:** set a stop flag; the run finishes the clip it is rendering, delivers it, and exits before the
+  next video or stage. Partially processed videos stay resumable (M2 status machine) and continue on the next Start.
+- **Stop now:** terminate the run's process group (including whisper/ffmpeg children); resumable as above.
+- Progress messages are edits of the control panel, plus one short notification per finished video
+  ("✅ 5 clips from <title>") so the chat does not get spammy.
+
+### Scheduling
+- Unload and remove the nightly launchd agent (`com.sanyam.clipper`); keep the bot agent
+  (`com.sanyam.clipper.telegram`, KeepAlive). `scripts/install_launchd.sh` installs only the bot agent.
+- Remove the `pmset repeat` wake suggestion from docs; the Mac only needs to be awake while a run is active
+  (`caffeinate -i` handles idle sleep; closing the lid still stops it — the panel should say so on start).
+
+### Config
+```yaml
+pipeline:
+  max_videos_per_run: 6
+  max_age_days: 30
+```
+`videos_per_night` is removed (or ignored).
+
+### Tests
+Start/stop state machine (idle → running → stopping → idle), single-run lock, stop flag honoured between clips,
+stop-now kills children, continuous selection order (new first, then backlog, age limit), per-run video cap,
+unauthorised chat ignored, control panel text. Mock subprocess and Telegram.

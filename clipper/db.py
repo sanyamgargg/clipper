@@ -46,6 +46,9 @@ CREATE TABLE IF NOT EXISTS runs(
 CREATE TABLE IF NOT EXISTS llm_calls(
     id INTEGER PRIMARY KEY, video_id TEXT, model TEXT, input_tokens INT, output_tokens INT,
     cost_usd REAL, exit_code INT, created_at TEXT);
+CREATE TABLE IF NOT EXISTS post_stats(
+    id INTEGER PRIMARY KEY, post_id INTEGER, checked_at TEXT, views INT, likes INT, comments INT,
+    source TEXT);  -- source: youtube_api | manual
 """
 
 # columns added after a table first shipped: (table, column, definition)
@@ -61,6 +64,10 @@ MIGRATIONS = (
     ("clips", "done_at", "TEXT"),
     ("clips", "message_deleted", "INTEGER DEFAULT 0"),
     ("posts", "duration_sec", "REAL"),
+    ("posts", "platform_video_id", "TEXT"),  # YouTube id parsed from the URL
+    ("posts", "mvr_reached_at", "TEXT"),
+    ("posts", "approved", "INT"),  # manual: /approved in Telegram
+    ("posts", "paid_usd", "REAL"),  # manual: /paid in Telegram
 )
 
 # Clip statuses: picked -> rendered -> delivered (sent to Telegram) -> posted | rejected.
