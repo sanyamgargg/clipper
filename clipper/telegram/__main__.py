@@ -4,6 +4,7 @@ python -m clipper.telegram link            once: after sending /start to the bot
 python -m clipper.telegram bot             long polling while the Mac is on
 python -m clipper.telegram poll            handle pending button presses / replies once
 python -m clipper.telegram deliver [-n N]  send rendered clips now
+python -m clipper.telegram refresh         re-edit the captions of clips still waiting
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from clipper.telegram.inbox import (
     find_start,
     open_inbox,
     poll,
+    refresh_captions,
     write_chat_id,
 )
 
@@ -93,6 +95,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("poll", help="handle pending updates once")
     send = sub.add_parser("deliver", help="send rendered clips now")
     send.add_argument("-n", "--limit", type=int, help="max clips (default telegram.max_per_run)")
+    sub.add_parser("refresh", help="re-edit captions of clips still waiting (new format)")
     args = parser.parse_args(argv)
 
     cfg = load_config(args.config)
@@ -120,6 +123,10 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "poll":
                 log.info("handled %d update(s)", poll(ix, 0))
                 return 0
+            if args.command == "refresh":
+                edited, failed = refresh_captions(ix)
+                log.info("refreshed %d message(s), %d failed", edited, failed)
+                return 1 if failed else 0
             if args.command == "deliver":
                 with run_lock(cfg.data_dir):  # a re-encode is a heavy step: not during a run
                     sent, failed = deliver(ix, args.limit or cfg.telegram.max_per_run)

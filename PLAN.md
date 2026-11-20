@@ -164,14 +164,8 @@ For each picked clip:
   download button, field to paste the posted URL per platform.
 - Runs locally: `uvicorn review.api:app`, open on phone via LAN for morning review.
 
-### 6.6 publish (phase 2 — only after views look promising)
-- **YouTube Data API v3** `videos.insert`: needs a Google Cloud project; unverified projects can only upload
-  **private** videos until the app passes Google's audit; upload costs a large chunk of daily quota (~6 uploads/day).
-- **Instagram Graph API**: needs an Instagram Business/Creator account linked to a Facebook Page and a Meta app.
-  Reels publishing takes a **publicly reachable `video_url`**, so clips need temporary public hosting
-  (e.g. an S3 bucket with a pre-signed URL) during publish.
-- Start the approvals early (1–3 weeks); keep manual posting until they land.
-- Schedule posts spaced across the day; add title, hashtags and required campaign caption text.
+### 6.6 publish
+Manual by design; see §16.
 
 ## 7. Database (SQLite)
 
@@ -206,8 +200,8 @@ llm_calls(id INTEGER PK, video_id, model, input_tokens, output_tokens, cost_usd,
 | M2 | Batch + DB + resumable | Pipeline processes 2 videos from config, survives a kill mid-run |
 | M3 | Clip inbox (Telegram) | Rendered clips arrive in a private Telegram chat with tap-to-copy caption; Done/Reject/links recorded (see §14) |
 | M4 | Nightly schedule | launchd runs it unattended for 3 nights in a row |
-| M5 | Metrics | Posted URLs + views + campaign status tracked; weekly summary command |
-| M6 | API publishing | YouTube + Instagram auto-post after approvals land |
+| M5 | Analytics (lite) | YouTube views via API key, Instagram views via /views in Telegram, MVR alerts, daily + weekly reports (see §15) |
+| M6 | ~~Publishing automation~~ | Dropped 2026-11-20: posting stays manual (see §16) |
 
 Build M0–M4 first (≈ 2 weekends). M5–M6 only if the test in §11 looks positive.
 
@@ -304,3 +298,56 @@ falling back to env `CLIPPER_TELEGRAM_TOKEN`.
 ### Tests
 Message formatting (HTML escaping, caption in `<code>`), URL → platform detection, callback handling state changes,
 size check and re-encode decision, unknown chat ids ignored. Mock the Telegram API; no real network in tests.
+
+## 15. M5 — Analytics (lite, no platform apps)
+
+Goal: see how each posted clip performs and when it crosses the payout threshold, without any Meta app,
+OAuth logins or app reviews. Posting stays manual (see §16).
+
+### Sources
+- **YouTube:** public statistics via YouTube Data API v3 `videos.list?part=statistics` with a plain **API key**
+  (Google Cloud project, API key restricted to YouTube Data API v3; stored in Keychain service
+  `clipper-youtube-key`). Views/likes/comments only; batched up to 50 ids per call (1 quota unit). No OAuth.
+- **Instagram:** no API. Sanyam reports views from the app via Telegram:
+  `/views <post_url_or_clip_id> <number>` (any time; latest value wins). The daily digest lists Instagram posts
+  without a value from the last 24 h as a reminder.
+- Audience countries are not collected automatically; Sanyam checks them in YouTube Studio / Instagram insights
+  once a week (the weekly report reminds him).
+
+### Data
+```sql
+post_stats(id INTEGER PK, post_id, checked_at, views INT, likes INT, comments INT, source TEXT)  -- source: youtube_api | manual
+```
+`posts` gains `platform_video_id` (YouTube id parsed from the URL), `mvr_reached_at`, `approved` (manual),
+`paid_usd` (manual).
+
+### Schedule
+`python -m clipper.analytics poll` (run by the Telegram bot process every 2 h): YouTube posts younger than 48 h every
+2 h, 2–14 days twice a day, 14–45 days once a day, then stop. Never block or fail the nightly pipeline.
+
+### Telegram
+- **MVR alert** once per post when views cross the campaign's `mvr_views` (TJR 5,000), YouTube or manual.
+- **Daily digest** 09:00 IST: yesterday's posts with latest views, total, estimated earnings (rate × views for posts
+  over MVR), Instagram posts missing a manual count.
+- **Weekly report** Monday 09:00 IST: top 3 / bottom 3 clips, median views at 48 h by length bucket (<25 s, 25–35 s,
+  >35 s), story vs non-story, layout/hook style; estimated vs paid earnings; reminder to check audience countries.
+- Commands: `/stats` (7-day summary), `/clip <id>`, `/views <url|id> <n>`, `/approved <url>`, `/paid <url> <usd>`.
+
+### Export
+`python -m clipper.analytics export` → `data/analytics/clips.csv` (hook, title, length, story, layout, score,
+views at 48 h per platform) for tuning the pick prompt later.
+
+### Tests
+YouTube URL/id parsing (watch, shorts, youtu.be), polling schedule, MVR alert fires once, `/views` parsing,
+earnings math, report bucketing. Mock HTTP.
+
+## 16. Publishing — manual (automation dropped)
+
+Decision (2026-11-20): no automated uploads to Instagram or YouTube. No Meta developer app, no Google OAuth,
+no YouTube audit. Sanyam posts by hand from the Telegram message (tap-to-copy caption with 5 hashtags,
+YouTube title with #shorts), then replies with the post links and submits them on Content Rewards within 30 min.
+- Keep `telegram.delete_local_after_send: true` (Telegram holds the file).
+- Remove any publish/OAuth/account-connect code started for this (Instagram resumable upload, YouTube
+  `videos.insert`, token storage for those), and the related config (`accounts`, `publish.enabled_platforms`,
+  `publish.slots_ist`, `publish.youtube_audited`). Keep `publish.default_hashtags` and `publish.caption_footer`
+  (or move them under `captions:`), since the Telegram caption uses them.

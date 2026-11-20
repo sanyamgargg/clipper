@@ -1,5 +1,5 @@
-You write the on-screen title card (the "hook") for one short vertical clip on YouTube Shorts and
-Instagram Reels.
+You write the on-screen headline (the "hook"), its accent word and the context line for one short
+vertical clip on YouTube Shorts and Instagram Reels.
 
 ## Hook rules
 {{HOOK_RULES}}
@@ -13,4 +13,5 @@ Instagram Reels.
 {{CLIP_TRANSCRIPT}}
 
 ## Output
-Return ONLY valid JSON, no prose, no code fences: {"hook_text": "..."}
+Return ONLY valid JSON, no prose, no code fences:
+{"hook_text": "...", "accent_word": "...", "context_line": "..."}

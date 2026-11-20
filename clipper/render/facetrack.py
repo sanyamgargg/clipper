@@ -54,6 +54,7 @@ class Face:
     top: float = 0.0  # box top, 0..1 of frame height
     bottom: float = 0.0  # box bottom, 0..1 of frame height
     kind: Kind = "face"
+    eye_y: float | None = None  # mean of the two eye keypoints, 0..1 of frame height
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,7 @@ class Crop:
     h: int
     y: int
     xs: list[int]  # crop x per output frame
+    ys: list[int] | None = None  # crop y per output frame, if it moves (else `y`)
 
 
 def ensure_model(models_dir: Path, name: str, kind: Literal["face", "object"] = "face") -> Path:
@@ -82,6 +84,10 @@ def ensure_model(models_dir: Path, name: str, kind: Literal["face", "object"] = 
 
 def _box(detection: Any, w: int, h: int, kind: Kind) -> Face:
     b = detection.bounding_box
+    keypoints = getattr(detection, "keypoints", None) or []
+    eye_y = (
+        (keypoints[0].y + keypoints[1].y) / 2 if kind == "face" and len(keypoints) >= 2 else None
+    )
     return Face(
         cx=(b.origin_x + b.width / 2) / w,
         size=b.width / w,
@@ -89,6 +95,7 @@ def _box(detection: Any, w: int, h: int, kind: Kind) -> Face:
         top=b.origin_y / h,
         bottom=(b.origin_y + b.height) / h,
         kind=kind,
+        eye_y=eye_y,
     )
 
 
@@ -255,45 +262,104 @@ def crop_path(
     sample_fps: float = SAMPLE_FPS,
     cuts: frozenset[int] | set[int] = frozenset(),
     cut_times: list[float] | tuple[float, ...] = (),
+    max_side: int | None = None,
+    y_fracs: list[float] | None = None,
 ) -> Crop:
-    """Crop window with the output aspect ratio and its x position for every output frame:
+    """Crop window with the output aspect ratio and its position for every output frame:
     linear interpolation between samples, clamped to the frame. At a shot cut (sample j
     in `cuts`) the crop does not interpolate but switches from sample j-1 to j, at the
-    camera cut in `cut_times` between them if there is one, else at sample j."""
+    camera cut in `cut_times` between them if there is one, else at sample j.
+    `max_side` caps a square crop (framed layout: 1080 source px, never upscaled for
+    1080p); `y_fracs` then places it vertically (0 = top .. 1 = bottom of the room)."""
     crop_w = min(src_w, int(src_h * out_w / out_h) // 2 * 2)
+    if max_side:
+        crop_w = min(crop_w, max_side // 2 * 2)
     crop_h = min(src_h, int(crop_w * out_h / out_w) // 2 * 2)
-    max_x = src_w - crop_w
-    centers = centers or [0.5]
-    last = len(centers) - 1
+    max_x, room = src_w - crop_w, src_h - crop_h
+    xs = [
+        int(min(max_x, max(0, round(c * src_w - crop_w / 2))))
+        for c in _per_frame(centers or [0.5], n_frames, fps, sample_fps, cuts, cut_times)
+    ]
+    ys = None
+    if y_fracs and room > 0:
+        ys = [
+            int(min(room, max(0, round(f * room))))
+            for f in _per_frame(y_fracs, n_frames, fps, sample_fps, cuts, cut_times)
+        ]
+    return Crop(w=crop_w, h=crop_h, y=ys[0] if ys else room // 2, xs=xs, ys=ys)
+
+
+def _per_frame(
+    samples: list[float],
+    n_frames: int,
+    fps: float,
+    sample_fps: float,
+    cuts: frozenset[int] | set[int],
+    cut_times: list[float] | tuple[float, ...],
+) -> list[float]:
+    """Sample values (SAMPLE_FPS) to one value per output frame; no easing across cuts."""
+    last = len(samples) - 1
     switch: dict[int, float] = {}
     for j in cuts:
         lo, hi = (j - 1) / sample_fps, (j + 0.5) / sample_fps
         found = [t for t in cut_times if lo < t <= hi]
         switch[j] = found[0] if found else j / sample_fps
-    xs: list[int] = []
+    out: list[float] = []
     for n in range(n_frames):
         t = n / fps
         pos = t * sample_fps
         i = min(int(pos), last)
         j = min(i + 1, last)
         if j in cuts and j != i:  # before sample j: old shot until the switch
-            c = centers[j] if t >= switch[j] else centers[i]
+            v = samples[j] if t >= switch[j] else samples[i]
         elif i in cuts and i > 0 and t < switch[i]:  # camera cut comes just after sample i
-            c = centers[i - 1]
+            v = samples[i - 1]
         else:
-            c = centers[i] + (centers[j] - centers[i]) * min(1.0, pos - i)
-        xs.append(int(min(max_x, max(0, round(c * src_w - crop_w / 2)))))
-    return Crop(w=crop_w, h=crop_h, y=(src_h - crop_h) // 2, xs=xs)
+            v = samples[i] + (samples[j] - samples[i]) * min(1.0, pos - i)
+        out.append(v)
+    return out
+
+
+HEAD_EXTEND = 0.35  # hair above the face box top, as a fraction of the box height
+EYE_FRAC = 0.38  # framed layout: eyes at this fraction of the square's height
+
+
+def square_y_fracs(
+    subjects: list[Face | None], src_h: int, side: int, eye_frac: float = EYE_FRAC
+) -> list[float | None]:
+    """Vertical place of a `side`-px square per sample, as a fraction of the room
+    (src_h - side): eyes at `eye_frac` of the square, but never cutting the top of the
+    head. All 0 when the square already spans the full height (1080p sources)."""
+    room = src_h - side
+    if room <= 0:
+        return [0.0] * len(subjects)
+    out: list[float | None] = []
+    for s in subjects:
+        if s is None or s.kind != "face":
+            out.append(None)
+            continue
+        box = s.bottom - s.top
+        eye = (s.eye_y if s.eye_y is not None else s.top + 0.4 * box) * src_h
+        head_top = (s.top - HEAD_EXTEND * box) * src_h
+        y = min(eye - eye_frac * side, head_top)
+        out.append(min(1.0, max(0.0, y / room)))
+    return out
 
 
 def sendcmd_script(crop: Crop, fps: float) -> str:
-    """ffmpeg sendcmd file moving the crop filter's x; one line per change."""
+    """ffmpeg sendcmd file moving the crop filter's x (and y); one line per change."""
     lines: list[str] = []
-    prev: int | None = crop.xs[0] if crop.xs else None
-    for n, x in enumerate(crop.xs):
-        if n and x != prev:
-            lines.append(f"{n / fps:.4f} crop x {x};")
-            prev = x
+    ys = crop.ys or [crop.y] * len(crop.xs)
+    prev = (crop.xs[0], ys[0]) if crop.xs else None
+    for n, (x, y) in enumerate(zip(crop.xs, ys, strict=True)):
+        if n and prev and (x, y) != prev:
+            cmds = []
+            if x != prev[0]:
+                cmds.append(f"crop x {x}")
+            if y != prev[1]:
+                cmds.append(f"crop y {y}")
+            lines.append(f"{n / fps:.4f} {', '.join(cmds)};")
+            prev = (x, y)
     return "\n".join(lines) + "\n"
 
 

@@ -26,7 +26,7 @@ from clipper.llm.claude_cli import ClaudeCLIError
 from clipper.proc import AlreadyRunning, lock_held, run_lock
 from clipper.stages.discover import discover
 from clipper.stages.fetch import VideoMeta, fetch_audio, fetch_segment, probe
-from clipper.stages.pick import Clip, load_clips, pick, regenerate_hook, save_clips
+from clipper.stages.pick import Clip, load_clips, pick, regenerate_headline, save_clips
 from clipper.stages.render import render_clip
 from clipper.stages.transcribe import transcribe
 from clipper.telegram.api import TelegramError
@@ -304,15 +304,18 @@ def rerender(
     if new_hook:
         video = db.get_video(conn, video_id)
         try:
-            hook = regenerate_hook(cfg, conn, clip, cfg.campaign(video["campaign_id"]), words,
-                                   video["title"] or "")  # fmt: skip
+            head = regenerate_headline(cfg, conn, clip, cfg.campaign(video["campaign_id"]),
+                                       words, video["title"] or "")  # fmt: skip
         except (ClaudeCLIError, ValueError) as exc:
             log.error("%s: no new hook: %s", clip.id, exc)
             return EXIT_CLAUDE
-        log.info("%s: hook %r -> %r", clip.id, clip.hook_text, hook)
-        clip.hook_text = hook
+        log.info("%s: hook %r -> %r (accent %r, context %r)", clip.id, clip.hook_text,
+                 head.hook_text, head.accent_word, head.context_line)  # fmt: skip
+        clip.hook_text = head.hook_text
+        clip.accent_word = head.accent_word
+        clip.context_line = head.context_line
         save_clips(clips, clips_path)
-        db.update_clip(conn, clip.id, hook_text=hook)
+        db.update_clip(conn, clip.id, hook_text=head.hook_text)
     ok = _render_one(cfg, conn, VideoMeta.load(info_path), index, clip, words)
     return EXIT_OK if ok else EXIT_FAILURES
 
@@ -329,7 +332,9 @@ def main(argv: list[str] | None = None) -> int:
     what.add_argument(
         "--rerender-all", action="store_true", help="render all rendered/delivered clips again"
     )
-    parser.add_argument("--layout", choices=["crop", "fit"], help="with --rerender: new layout")
+    parser.add_argument(
+        "--layout", choices=["framed", "crop", "fit"], help="with --rerender: new layout"
+    )
     parser.add_argument(
         "--new-hook", action="store_true", help="with --rerender(-all): ask Claude for a new hook"
     )

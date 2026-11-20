@@ -47,3 +47,12 @@ def test_encoder_args_per_encoder():
     ]  # fmt: skip
     assert "-preset" in encoder_args("libx264", "9M")
     assert encoder_args("h264_qsv", "9M")[-1] == "nv12"
+
+
+def test_framed_filter_pads_the_square_onto_the_canvas():
+    square = Crop(w=1080, h=1080, y=0, xs=[420])
+    vf = video_filter(R, square, "crop.cmd", "c.ass", "fonts", framed=(484, 1080, "#0C0C0C"))
+    assert vf == (
+        "[0:v]fps=30,sendcmd=f=crop.cmd,crop=1080:1080:420:0,scale=1080:1080:flags=lanczos,"
+        "pad=1080:1920:0:484:color=0x0C0C0C,setsar=1,ass=c.ass:fontsdir=fonts[v]"
+    )

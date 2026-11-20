@@ -10,7 +10,7 @@ from clipper.stages.pick import (
     build_prompt,
     hook_problems,
     parse_response,
-    regenerate_hook,
+    regenerate_headline,
     resolve_clips,
 )
 from clipper.timing import Word
@@ -126,19 +126,20 @@ def test_build_prompt_fills_every_placeholder():
 
 def test_hook_rules_are_in_the_pick_prompt():
     prompt = build_prompt(Config(campaigns=[CAMPAIGN]), CAMPAIGN, "[00:00] Hi.")
-    assert "6–10 words, concrete and specific" in prompt
-    assert '"I just want it more" → "TJR\'s 5:30 AM routine as a $10M trader"' in prompt
+    assert '5–9 words in a "setup: punch" shape' in prompt
+    assert "accent_word" in prompt and "context_line" in prompt
+    assert '"TJR trades sick: up at 5:30, plunge at 8" (accent_word "5:30")' in prompt
     assert "ALL CAPS (they are highlighted)" not in prompt
 
 
 @pytest.mark.parametrize(
     ("hook", "problems"),
     [
-        ("TJR's 5:30 AM routine as a $10M trader", []),
-        ("I just want it more", ["5 words instead of 6-10"]),
-        ("Why TJR NEVER trades on news days anymore", ["ALL CAPS words: NEVER"]),
+        ("TJR's $10K challenge: $500 on day one", []),
+        ("I just want it more", ['no "setup: punch" colon']),
+        ("TJR: NEVER again", ["3 words instead of 5-9", "ALL CAPS words: NEVER"]),
         (
-            "TJR lost $56,000 on NQ today and stayed calm!",
+            "TJR's day one: down $56,000 on NQ!",
             ["no exclamation marks, hashtags or quotation marks"],
         ),
     ],
@@ -147,13 +148,34 @@ def test_hook_problems(hook, problems):
     assert hook_problems(hook) == problems
 
 
-def test_regenerate_hook_uses_the_clip_and_retries_a_bad_hook(monkeypatch, tmp_path):
+def test_accent_and_context_checks():
+    hook = "TJR's $10K challenge: $500 on day one"
+    assert hook_problems(hook, "$500", "TJR · $10K live trading challenge") == []
+    assert hook_problems(hook, "$600", "TJR") == [
+        "accent_word must be copied exactly from hook_text"
+    ]
+    assert hook_problems(hook, "day one", "one two three four five six seven") == [
+        "context_line must be 1-6 words"
+    ]
+
+
+def test_picked_clips_keep_accent_and_context():
+    pick = PickedClip(start="00:00", end="00:05", hook_text="Setup: punch here now", title="t",
+                      score=0.9, accent_word=" punch ", context_line="TJR ·  challenge")  # fmt: skip
+    clip = resolve_clips([pick], WORDS, "vid", CAMPAIGN, 2, 20)[0]
+    assert (clip.accent_word, clip.context_line) == ("punch", "TJR · challenge")
+
+
+def test_regenerate_headline_uses_the_clip_and_retries_a_bad_reply(monkeypatch, tmp_path):
     cfg = Config(machine=Machine(data_dir=tmp_path, min_free_gb=0), campaigns=[CAMPAIGN])
     conn = db.connect(tmp_path)
     clip = Clip("v_01", "v", 2.4, 7.5, "I just want it more", "Title", "Title #TJR", "r", 0.9)
     replies = iter([
-        '{"hook_text": "TJR WANTS IT MORE"}',
-        '{"hook_text": "\\"TJR\'s 5:30 AM routine as a $10M trader.\\""}',
+        '{"hook_text": "TJR WANTS IT MORE", "accent_word": "more", "context_line": "TJR"}',
+        (
+            '{"hook_text": "\\"TJR trades sick: up at 5:30, plunge at 8.\\"", "accent_word": "5:30",'
+            ' "context_line": "TJR · a $10M trader\'s day"}'
+        ),
     ])  # fmt: skip
     prompts = []
 
@@ -162,10 +184,11 @@ def test_regenerate_hook_uses_the_clip_and_retries_a_bad_hook(monkeypatch, tmp_p
         return LLMResult(next(replies), 0, "sonnet", 100, 10, 0.001)
 
     monkeypatch.setattr(pick_mod, "run_claude", fake_claude)
-    hook = regenerate_hook(cfg, conn, clip, CAMPAIGN, WORDS, "What a $10M Trader Does in a Day")
-    assert hook == "TJR's 5:30 AM routine as a $10M trader"  # quotes and full stop stripped
+    head = regenerate_headline(cfg, conn, clip, CAMPAIGN, WORDS, "What a $10M Trader Does")
+    assert head.hook_text == "TJR trades sick: up at 5:30, plunge at 8"  # quotes, stop stripped
+    assert (head.accent_word, head.context_line) == ("5:30", "TJR · a $10M trader's day")
     assert "Six seven eight nine ten?" in prompts[0]  # only what is said in the clip
     assert "One two" not in prompts[0] and "What a $10M Trader" in prompts[0]
-    assert "breaks these rules" in prompts[1]
+    assert "breaks these rules" in prompts[1] and "colon" in prompts[1]
     assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == 2
     conn.close()

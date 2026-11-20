@@ -8,9 +8,14 @@ from clipper.render.captions import (
     YELLOW,
     CaptionStyle,
     FontMetrics,
+    FramedStyle,
+    accent_spans,
     apply_fixes,
+    ass_color,
+    ass_inline_color,
     ass_time,
     build_ass,
+    build_framed_ass,
     caption_events,
     caption_words,
     caption_ys,
@@ -19,6 +24,7 @@ from clipper.render.captions import (
     display,
     hook_markup,
     is_caps_word,
+    layout_framed,
     layout_hook,
     layout_titlecard,
     rounded_rect,
@@ -393,3 +399,70 @@ def test_build_ass_titlecard(montserrat, semibold):
     assert 1 <= len(texts) <= 2
     assert all("\\fad(150,0)" in t and "\\fscx" not in t and YELLOW not in t for t in texts)
     assert texts[0].split("}", 1)[1].startswith("TJR's")  # sentence case
+
+
+# --- framed layout -------------------------------------------------------------------
+
+
+def test_ass_colors_are_bgr():
+    assert ass_color("#FFD600") == "&H0000D6FF" and ass_color("#969696", 0x4D) == "&H4D969696"
+    assert ass_inline_color("#FFD600") == "&H00D6FF&"
+
+
+def test_accent_spans_ignore_punctuation_and_case():
+    words = ["TJR's", "$10K", "challenge:", "$500", "on", "day", "one"]
+    assert accent_spans(words, "$500") == {3}
+    assert accent_spans(words, "challenge") == {2}  # the colon is ignored
+    assert accent_spans(words, "day one") == {5, 6}
+    assert accent_spans(words, "$600") == set() and accent_spans(words, "") == set()
+
+
+def test_framed_layout_stacks_headline_context_and_square(montserrat, semibold):
+    fs = FramedStyle()
+    lay = layout_framed("TJR's $10K challenge: $500 on day one",
+                        "TJR · $10K live trading challenge", montserrat, semibold, fs)  # fmt: skip
+    assert lay.headline == ["TJR's $10K challenge:", "$500 on day one"]  # breaks at the colon
+    assert lay.headline_px == 64
+    assert all(montserrat.width(line, 64) <= 1080 - 2 * 60 for line in lay.headline)
+    assert lay.headline_ys[0] < lay.headline_ys[1] < lay.context_y < lay.video_top
+    # centred: the space above the block is 80 px less than below it (nudged up 40)
+    head_top = lay.headline_ys[0] + montserrat.ascent * 64 / 1000 - montserrat.cap * 64 / 1000
+    below = 1920 - (lay.video_top + 1080)
+    assert below - head_top == pytest.approx(80, abs=2)
+    assert lay.caption_y == lay.video_top + 1080 - 200
+
+
+def test_framed_headline_shrinks_to_two_lines(montserrat, semibold):
+    long = "TJR's biggest lesson from the challenge: never trade during red folder news days"
+    lay = layout_framed(long, "", montserrat, semibold, FramedStyle())
+    assert len(lay.headline) == 2 and lay.headline_px < 64
+    assert all(montserrat.width(line, lay.headline_px) <= 960 + 1 for line in lay.headline)
+    assert lay.context_y is None
+
+
+def test_build_framed_ass(montserrat, semibold):
+    fs = FramedStyle()
+    lay = layout_framed("TJR's $10K challenge: $500 on day one", "TJR · $10K challenge",
+                        montserrat, semibold, fs)  # fmt: skip
+    ass = build_framed_ass(make_words("Hello there my friend."), "$500", "TJR · $10K challenge",
+                           lay, fs, montserrat, semibold, 31.0)  # fmt: skip
+    styles = {line.split(",")[0]: line for line in ass.splitlines() if line.startswith("Style:")}
+    assert styles["Style: Caption"].startswith("Style: Caption,Montserrat Black,100,&H00FFFFFF,")
+    assert ",1,6,0,5," in styles["Style: Caption"]  # outline 6, no shadow, centred
+    assert styles["Style: Context"].startswith("Style: Context,Montserrat SemiBold,56,&H00969696,")
+    heads = [line for line in ass.splitlines() if ",Headline,," in line]
+    assert heads[0].startswith("Dialogue: 2,0:00:00.00,0:00:31.00,Headline,")  # whole clip
+    assert f"\\an7\\pos(60,{lay.headline_ys[0]})" in heads[0]
+    assert "{\\c&H00D6FF&}$500{\\c&HFFFFFF&}" in heads[1]  # the accent word, yellow
+    assert "\\fad" not in ass and "\\t(" not in ass  # no animation anywhere
+    caps = [line for line in ass.splitlines() if ",Caption,," in line]
+    assert all(f"\\an5\\pos(540,{lay.caption_y})" in c for c in caps)
+    assert all("\\fscx100\\fscy100" in c and "\\fscx112" not in c for c in caps)
+    assert "{\\c&H00D6FF&\\fscx100\\fscy100}HELLO" in caps[0]
+
+
+def test_accent_colour_skips_trailing_punctuation(montserrat, semibold):
+    fs = FramedStyle()
+    lay = layout_framed("TJR's morning: up at 5:30, cold plunge at 8", "", montserrat, semibold, fs)
+    ass = build_framed_ass([], "5:30", "", lay, fs, montserrat, semibold, 10.0)
+    assert "{\\c&H00D6FF&}5:30{\\c&HFFFFFF&}," in ass

@@ -1,7 +1,6 @@
-The hook is the title card at the top of the clip, on screen for its whole length.
-- 6–10 words, concrete and specific: say who and what is at stake, using the names, numbers and places
-  from the clip.
-- It gives the context the clip skips, so the first second already tells the viewer why to keep watching.
+The hook is the headline above the video, on screen for the whole clip.
+- 5–9 words in a "setup: punch" shape: a short setup, a colon, then the punch.
+- Concrete and specific: say who and what is at stake, with the names, numbers and places from the clip.
 - Sentence case: capitalise only the first word and names. No ALL CAPS words (names and acronyms such as
   TJR, NQ or AM are fine).
 - No vague phrases or slogans: "This changed everything", "Watch till the end", "Mindset is everything",
@@ -9,8 +8,14 @@ The hook is the title card at the top of the clip, on screen for its whole lengt
 - Never clickbait the clip does not deliver: everything the hook promises must be said in the clip.
 - No emojis, hashtags, quotation marks or exclamation marks.
 
+accent_word: the one key word or number of the punch, copied exactly from hook_text (e.g. "$500"). It is
+shown in yellow.
+
+context_line: who and what, at most 6 words, shown small under the headline, parts joined with " · ",
+e.g. "TJR · $10K live trading challenge".
+
 Examples (bad → good):
-- "I just want it more" → "TJR's 5:30 AM routine as a $10M trader"
-- "This changed everything" → "Why TJR moved to Puerto Rico once he made money"
+- "I just want it more" → "TJR trades sick: up at 5:30, plunge at 8" (accent_word "5:30")
+- "This changed everything" → "TJR's first big money move: Puerto Rico" (accent_word "Puerto")
 
 The examples only show the style: take every fact from the clip itself.

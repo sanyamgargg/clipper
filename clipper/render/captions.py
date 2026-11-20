@@ -198,14 +198,20 @@ def _scale(pct: int, pop_ms: int) -> str:
     return f"\\fscx{start}\\fscy{start}\\t(0,{pop_ms},\\fscx{pct}\\fscy{pct})"
 
 
-def chunk_fit(chunk: list[Word], metrics: FontMetrics | None, px: float, max_width: float) -> float:
+def chunk_fit(
+    chunk: list[Word],
+    metrics: FontMetrics | None,
+    px: float,
+    max_width: float,
+    active_scale: int = ACTIVE_SCALE,
+) -> float:
     """Scale factor (<= 1) that keeps the chunk on screen even with its widest word
-    enlarged to ACTIVE_SCALE."""
+    enlarged to `active_scale`."""
     if metrics is None:
         return 1.0
     texts = [display(w.w) for w in chunk]
     base = metrics.width(" ".join(texts), px, CAPTION_SPACING)
-    grow = max(metrics.width(t, px, CAPTION_SPACING) for t in texts) * (ACTIVE_SCALE / 100 - 1)
+    grow = max(metrics.width(t, px, CAPTION_SPACING) for t in texts) * (active_scale / 100 - 1)
     return min(1.0, max_width / (base + grow))
 
 
@@ -216,27 +222,30 @@ def caption_events(
     max_width: float = 1080 - 2 * CAPTION_MARGIN,
     linger: float = 0.2,
     positions: list[tuple[int, int]] | None = None,
+    highlight: str = YELLOW,
+    active_scale: int = ACTIVE_SCALE,
+    pop_ms: int = CAPTION_POP_MS,
 ) -> list[tuple[float, float, str]]:
-    """One (start, end, text) event per word: the whole chunk, that word yellow and
-    enlarged. Each chunk pops in on its first event only. A chunk stays up `linger` s
-    after its last word, but never into the next chunk. `positions`: an (x, y) anchor
-    per chunk, written as \\an5\\pos."""
+    """One (start, end, text) event per word: the whole chunk, that word in `highlight`
+    and enlarged to `active_scale`. Each chunk pops in (`pop_ms`, 0 = none) on its first
+    event only. A chunk stays up `linger` s after its last word, but never into the next
+    chunk. `positions`: an (x, y) anchor per chunk, written as \\an5\\pos."""
     events: list[tuple[float, float, str]] = []
     for ci, chunk in enumerate(chunks):
         pos = f"\\an5\\pos({positions[ci][0]},{positions[ci][1]})" if positions else ""
         next_start = chunks[ci + 1][0].s if ci + 1 < len(chunks) else float("inf")
         chunk_end = max(chunk[-1].s, min(chunk[-1].e + linger, next_start))
-        fit = chunk_fit(chunk, metrics, px, max_width)
-        base, active = round(100 * fit), round(ACTIVE_SCALE * fit)
+        fit = chunk_fit(chunk, metrics, px, max_width, active_scale)
+        base, active = round(100 * fit), round(active_scale * fit)
         first = True
         for wi, w in enumerate(chunk):
             end = chunk[wi + 1].s if wi + 1 < len(chunk) else chunk_end
             if end - w.s < 0.01:
                 continue
-            pop = CAPTION_POP_MS if first else 0
+            pop = pop_ms if first else 0
             first = False
             parts = [
-                f"{{\\c{YELLOW}{_scale(active, pop)}}}{display(x.w)}"
+                f"{{\\c{highlight}{_scale(active, pop)}}}{display(x.w)}"
                 f"{{\\c{WHITE}{_scale(base, pop)}}}"
                 if k == wi
                 else display(x.w)
@@ -647,3 +656,199 @@ def _classic_hook(
             f"{tags}{hook_markup(hook.lines, s.hook_style)}\n"
         )
     return hook_style, events
+
+
+# --- framed layout ------------------------------------------------------------------
+# Dark canvas, headline + context line above a square video, captions inside the square.
+
+HEADLINE_PITCH_EM = 1.15  # baseline to baseline
+GAP_HEADLINE_CONTEXT = 22
+GAP_CONTEXT_VIDEO = 40
+
+
+def ass_color(hex_rgb: str, alpha: int = 0) -> str:
+    """'#RRGGBB' -> ASS '&HAABBGGRR' (style fields)."""
+    h = hex_rgb.lstrip("#")
+    return f"&H{alpha:02X}{h[4:6]}{h[2:4]}{h[0:2]}".upper()
+
+
+def ass_inline_color(hex_rgb: str) -> str:
+    """'#RRGGBB' -> ASS '&HBBGGRR&' (\\c override tags)."""
+    h = hex_rgb.lstrip("#")
+    return f"&H{h[4:6]}{h[2:4]}{h[0:2]}&".upper()
+
+
+@dataclass(frozen=True)
+class FramedStyle:
+    width: int = 1080
+    height: int = 1920
+    video_px: int = 1080  # the square
+    background: str = "#0C0C0C"
+    margin: int = 60  # headline left/right
+    nudge_up: int = 40  # whole block, from vertically centred
+    headline_font: str = "Montserrat Black"
+    headline_px: float = 64
+    accent_color: str = "#FFD600"
+    context_font: str = "Montserrat SemiBold"
+    context_px: float = 36
+    context_color: str = "#969696"
+    caption_px: float = 64
+    caption_outline: int = 6
+    caption_above_bottom: int = 200  # caption centre, above the bottom of the square
+
+
+@dataclass(frozen=True)
+class FramedLayout:
+    headline: list[str]
+    headline_px: int
+    headline_ys: list[int]  # \an7 top of each headline line
+    context_y: int | None  # \an7 top of the context line
+    video_top: int
+    caption_y: int
+
+
+def accent_spans(words: list[str], accent: str) -> set[int]:
+    """Indices of the words (punctuation-insensitive) that make up `accent`."""
+
+    def norm(token: str) -> str:
+        return re.sub(r"^[^\w$]+|[^\w%]+$", "", token).casefold()
+
+    target = [norm(t) for t in accent.split() if norm(t)]
+    if not target:
+        return set()
+    keys = [norm(w) for w in words]
+    for i in range(len(words) - len(target) + 1):
+        if keys[i : i + len(target)] == target:
+            return set(range(i, i + len(target)))
+    return set()
+
+
+def layout_framed(
+    hook: str, context: str, headline: FontMetrics, ctx: FontMetrics, fs: FramedStyle
+) -> FramedLayout:
+    """Stack headline (1-2 left-aligned lines, up to headline_px, shrunk to fit; a break
+    after the "setup:" colon is preferred), context line and the square video, centred
+    vertically and nudged up."""
+    words = hook.split()
+    avail = fs.width - 2 * fs.margin
+    lines: list[str] = []
+    px = fs.headline_px
+    if words:
+        candidates = [[" ".join(words)]] + [
+            [" ".join(words[:k]), " ".join(words[k:])] for k in range(1, len(words))
+        ]
+        best: tuple[tuple[int, int, int, float], list[str]] | None = None
+        for cand in candidates:
+            widest = max(headline.width(line, 1.0) for line in cand)
+            size = min(fs.headline_px, avail / widest)
+            colon = int(len(cand) == 2 and cand[0].endswith(":"))
+            key = (math.floor(size), colon, -len(cand), -widest)
+            if best is None or key > best[0]:
+                best = (key, cand)
+        assert best is not None
+        px, lines = best[0][0], best[1]
+
+    unit = px / headline.upm
+    cap = headline.cap * unit
+    pitch = HEADLINE_PITCH_EM * px
+    head_h = cap + (len(lines) - 1) * pitch if lines else 0.0
+    ctx_unit = fs.context_px / ctx.upm
+    ctx_cap = ctx.cap * ctx_unit if context else 0.0
+    ctx_block = GAP_HEADLINE_CONTEXT + ctx_cap if context else 0.0
+    gap = GAP_CONTEXT_VIDEO if lines or context else 0
+    block = head_h + ctx_block + gap + fs.video_px
+    top = max(0.0, (fs.height - block) / 2 - fs.nudge_up)
+
+    headline_ys = [round(top + cap + i * pitch - headline.ascent * unit) for i in range(len(lines))]
+    context_y = None
+    if context:
+        baseline = top + head_h + GAP_HEADLINE_CONTEXT + ctx_cap
+        context_y = round(baseline - ctx.ascent * ctx_unit)
+    video_top = round(top + head_h + ctx_block + gap)
+    return FramedLayout(
+        headline=lines,
+        headline_px=px,
+        headline_ys=headline_ys,
+        context_y=context_y,
+        video_top=video_top,
+        caption_y=video_top + fs.video_px - fs.caption_above_bottom,
+    )
+
+
+FRAMED_HEADER = """[Script Info]
+ScriptType: v4.00+
+PlayResX: {width}
+PlayResY: {height}
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, \
+Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, \
+Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Caption,{headline_font},{caption_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,\
+-1,0,0,0,100,100,{spacing},0,1,{caption_outline},0,5,{margin},{margin},0,1
+Style: Headline,{headline_font},{headline_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,\
+-1,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: Context,{context_font},{context_size},{context_color},{context_color},&H00000000,\
+&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+
+def build_framed_ass(
+    words: list[Word],
+    accent_word: str,
+    context_line: str,
+    layout: FramedLayout,
+    fs: FramedStyle,
+    headline: FontMetrics,
+    ctx: FontMetrics,
+    duration: float,
+) -> str:
+    """ASS file for the framed layout: headline (accent word coloured) and context line
+    for the whole clip, no animation; captions near the bottom of the square."""
+    out = [
+        FRAMED_HEADER.format(
+            width=fs.width,
+            height=fs.height,
+            headline_font=fs.headline_font,
+            caption_size=headline.ass_size(fs.caption_px),
+            spacing=CAPTION_SPACING,
+            caption_outline=fs.caption_outline,
+            margin=fs.margin,
+            headline_size=headline.ass_size(layout.headline_px),
+            context_font=fs.context_font,
+            context_size=ctx.ass_size(fs.context_px),
+            context_color=ass_color(fs.context_color),
+        )
+    ]
+    span = f"{ass_time(0)},{ass_time(duration)}"
+    accent = ass_inline_color(fs.accent_color)
+    all_words = " ".join(layout.headline).split()
+    marked = accent_spans(all_words, accent_word)
+    k = 0
+    for line, y in zip(layout.headline, layout.headline_ys, strict=True):
+        parts = []
+        for w in line.split():
+            if k in marked:  # colour the word only, not trailing punctuation ("5:30,")
+                core, tail = re.match(r"^(.*?)([.,;:!?]*)$", w).groups()  # type: ignore[union-attr]
+                parts.append(f"{{\\c{accent}}}{core}{{\\c{WHITE}}}{tail}")
+            else:
+                parts.append(w)
+            k += 1
+        out.append(f"Dialogue: 2,{span},Headline,,0,0,0,,"
+                   f"{{\\an7\\pos({fs.margin},{y})\\q2}}{' '.join(parts)}\n")  # fmt: skip
+    if layout.context_y is not None and context_line:
+        out.append(f"Dialogue: 2,{span},Context,,0,0,0,,"
+                   f"{{\\an7\\pos({fs.margin},{layout.context_y})\\q2}}{context_line}\n")  # fmt: skip
+    chunks = chunk_words(words)
+    positions = [(fs.width // 2, layout.caption_y)] * len(chunks)
+    for start, end, text in caption_events(
+        chunks, headline, fs.caption_px, fs.video_px - 2 * fs.margin, positions=positions,
+        highlight=accent, active_scale=100, pop_ms=0,
+    ):  # fmt: skip
+        out.append(f"Dialogue: 1,{ass_time(start)},{ass_time(end)},Caption,,0,0,0,,{text}\n")
+    return "".join(out)

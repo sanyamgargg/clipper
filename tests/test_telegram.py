@@ -8,7 +8,7 @@ import pytest
 import requests
 
 from clipper import db
-from clipper.config import Campaign, Config, Machine, Rules, Telegram
+from clipper.config import Campaign, Captions, Config, Machine, Rules, Telegram
 from clipper.stages.pick import Clip, load_clips, save_clips
 from clipper.telegram import api as api_mod
 from clipper.telegram import inbox as ib
@@ -53,6 +53,10 @@ def ix(tmp_path, monkeypatch):
     cfg = Config(
         machine=Machine(data_dir=tmp_path, min_free_gb=0),
         telegram=Telegram(enabled=True, chat_id=CHAT, max_upload_mb=45),
+        captions=Captions(
+            default_hashtags=["#TJR", "#daytrading", "#trading", "#money", "#mindset"],
+            caption_footer="Follow for daily TJR clips 📈",
+        ),
         campaigns=[
             Campaign(
                 id="tjr",
@@ -100,12 +104,19 @@ def send_text(ix, text: str, reply_to: int | None = None, chat: int = CHAT) -> N
 # --- formatting -------------------------------------------------------------------
 
 
-def test_caption_escapes_html_and_puts_the_post_caption_in_code(ix):
+def test_caption_escapes_html_and_puts_caption_hashtags_and_yt_title_in_code(ix):
     clip, campaign = ix.clip("v1_01")
-    text = ib.clip_caption(clip, campaign)
+    text = ib.clip_caption(ix.cfg, clip, campaign)
     assert text.startswith("<b>Why &lt;rich&gt; people &amp; you</b>\nTJR &lt;Reach&gt;")
     assert "score 0.80 · 30 s" in text
-    assert "<code>Why &lt;rich&gt; people &amp; you #TJR</code>" in text
+    assert (
+        "Caption + hashtags (tap to copy):\n<code>Why &lt;rich&gt; people &amp; you\n\n"
+        "Follow for daily TJR clips 📈\n\n#TJR #daytrading #trading #money #mindset</code>"
+    ) in text
+    assert (
+        "YouTube title (tap to copy):\n<code>Why &lt;rich&gt; people &amp; you #shorts</code>"
+        in text
+    )
     assert f"Submit within 30 min of posting:\n{SUBMIT}" in text
     assert "<rich>" not in text
 
@@ -113,9 +124,19 @@ def test_caption_escapes_html_and_puts_the_post_caption_in_code(ix):
 def test_caption_stays_within_telegram_limit(ix):
     clip, campaign = ix.clip("v1_01")
     long = Clip(**{**clip.__dict__, "title": "word " * 400})
-    text = ib.clip_caption(long, campaign, note="✅ Posted 10:00")
+    text = ib.clip_caption(ix.cfg, long, campaign, note="✅ Posted 10:00")
     assert len(text) <= 1024
-    assert text.endswith("✅ Posted 10:00") and "#TJR</code>" in text
+    assert text.endswith("✅ Posted 10:00")
+    assert "#TJR #daytrading #trading #money #mindset</code>" in text and "#shorts</code>" in text
+
+
+def test_refresh_edits_waiting_messages_with_the_new_caption(ix):
+    ib.deliver(ix, limit=2)
+    press(ix, "done:v1_02")  # posted: not refreshed
+    assert ib.refresh_captions(ix) == (1, 0)
+    edit = ix.api.last("editMessageCaption")
+    assert edit["message_id"] == 101 and "#mindset</code>" in edit["caption"]
+    assert edit["reply_markup"] == ib.buttons("v1_01", "crop")
 
 
 @pytest.mark.parametrize(
@@ -139,11 +160,15 @@ def test_find_urls_strips_trailing_punctuation():
     assert ib.find_urls(text) == ["https://youtube.com/shorts/a", "https://instagram.com/reel/b"]
 
 
-def test_buttons_offer_the_other_layout():
-    crop = ib.buttons("v1_01", "crop")["inline_keyboard"]
-    assert [b["callback_data"] for b in crop[0]] == ["done:v1_01", "reject:v1_01"]
-    assert crop[1][0] == {"text": "🔁 Fit layout", "callback_data": "fit:v1_01"}
-    assert ib.buttons("v1_01", "fit")["inline_keyboard"][1][0]["callback_data"] == "crop:v1_01"
+def test_buttons_offer_the_other_layouts():
+    framed = ib.buttons("v1_01", "framed")["inline_keyboard"]
+    assert [b["callback_data"] for b in framed[0]] == ["done:v1_01", "reject:v1_01"]
+    assert framed[1] == [
+        {"text": "🔁 Crop", "callback_data": "crop:v1_01"},
+        {"text": "🔁 Fit", "callback_data": "fit:v1_01"},
+    ]
+    fit = ib.buttons("v1_01", "fit")["inline_keyboard"][1]
+    assert [b["callback_data"] for b in fit] == ["framed:v1_01", "crop:v1_01"]
 
 
 # --- size check --------------------------------------------------------------------

@@ -54,7 +54,18 @@ class Render(BaseModel):
     hook_min_font_size: int = 90  # never smaller, even if it then overlaps the head
     hook_fallback_top_frac: float = 0.09  # hook top when no face is found
     hook_top_limit_frac: float = 0.05  # hook never starts higher than this
-    default_layout: Literal["crop", "fit"] = "crop"  # per clip, can be changed later
+    default_layout: Literal["framed", "crop", "fit"] = "framed"  # per clip, can be changed
+    # framed layout: dark canvas, headline + context line, square video, captions in it
+    framed_video_px: int = 1080  # square side; taken at source resolution (<= this)
+    framed_background: str = "#0C0C0C"
+    framed_headline_px: int = 64  # caption_font (Montserrat Black); shrinks to fit 2 lines
+    framed_accent_color: str = "#FFD600"  # Claude's accent_word, and the spoken word
+    framed_context_px: int = 36  # hook_font (Montserrat SemiBold)
+    framed_context_color: str = "#969696"
+    framed_caption_px: int = 64
+    framed_caption_outline: int = 6
+    framed_caption_above_bottom: int = 200  # caption centre above the square's bottom
+    framed_nudge_up: int = 40  # the whole block, from vertically centred
     face_model: str = "blaze_face_short_range"  # data/models/<name>.tflite
     person_model: str = "efficientdet_lite0"  # fallback when no face: object detector
 
@@ -76,6 +87,20 @@ class Telegram(BaseModel):
     max_upload_mb: float = 45  # bot uploads max out at 50 MB; bigger clips are re-encoded
     delete_local_after_send: bool = True  # keep the jpg + json, drop the mp4
     delete_after_done_hours: float = 24  # then delete the video message from the chat
+
+
+class Captions(BaseModel):
+    """The tap-to-copy post caption: title, footer, then exactly `hashtag_count` hashtags
+    (campaign required_hashtags first, then these, up to 2 topic tags from Claude last)."""
+
+    default_hashtags: list[str] = Field(default_factory=list)
+    hashtag_count: int = 5
+    caption_footer: str = ""
+
+
+class CampaignCaptions(BaseModel):
+    default_hashtags: list[str] | None = None  # None: use captions.default_hashtags
+    caption_footer: str | None = None  # None: use captions.caption_footer
 
 
 class Rules(BaseModel):
@@ -103,6 +128,7 @@ class Campaign(BaseModel):
     rules: Rules = Field(default_factory=Rules)
     vocabulary: list[str] = Field(default_factory=list)  # whisper prompt: names, jargon
     caption_fixes: dict[str, str] = Field(default_factory=dict)  # misheard -> right, captions
+    captions: CampaignCaptions = Field(default_factory=CampaignCaptions)
     active: bool = True
 
 
@@ -113,6 +139,7 @@ class Config(BaseModel):
     telegram: Telegram = Field(default_factory=Telegram)
     claude: Claude = Field(default_factory=Claude)
     campaigns: list[Campaign] = Field(default_factory=list)
+    captions: Captions = Field(default_factory=Captions)
 
     @property
     def data_dir(self) -> Path:

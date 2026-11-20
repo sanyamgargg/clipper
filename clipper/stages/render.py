@@ -11,7 +11,16 @@ from pathlib import Path
 from clipper.config import Campaign, Config
 from clipper.disk import ensure_free_space
 from clipper.render import facetrack
-from clipper.render.captions import ESTIMATED, CaptionStyle, FontMetrics, build_ass, caption_words
+from clipper.render.captions import (
+    ESTIMATED,
+    CaptionStyle,
+    FontMetrics,
+    FramedStyle,
+    build_ass,
+    build_framed_ass,
+    caption_words,
+    layout_framed,
+)
 from clipper.render.ffmpeg import probe_video, render_cmd, run, thumbnail_cmd
 from clipper.stages.pick import Clip
 from clipper.timing import Word, words_between
@@ -44,6 +53,26 @@ def _caption_style(cfg: Config, fit: bool) -> CaptionStyle:
     )
 
 
+def _framed_style(cfg: Config) -> FramedStyle:
+    r = cfg.render
+    return FramedStyle(
+        width=r.width,
+        height=r.height,
+        video_px=r.framed_video_px,
+        background=r.framed_background,
+        headline_font=r.caption_font,
+        headline_px=r.framed_headline_px,
+        accent_color=r.framed_accent_color,
+        context_font=r.hook_font,
+        context_px=r.framed_context_px,
+        context_color=r.framed_context_color,
+        caption_px=r.framed_caption_px,
+        caption_outline=r.framed_caption_outline,
+        caption_above_bottom=r.framed_caption_above_bottom,
+        nudge_up=r.framed_nudge_up,
+    )
+
+
 def _metrics(fonts_dir: Path, family: str) -> FontMetrics:
     metrics = FontMetrics.find(fonts_dir, family)
     if metrics is None:
@@ -71,12 +100,13 @@ def render_clip(
     cfg: Config, clip: Clip, segment: Path, words: list[Word], campaign: Campaign
 ) -> Path:
     """`segment` holds exactly [clip.start_sec, clip.end_sec] of the source (t=0 = clip
-    start); `words` are the full-video words. `clip.layout` picks crop or fit.
+    start); `words` are the full-video words. `clip.layout` picks framed, crop or fit.
     Returns the rendered clip path."""
     r = cfg.render
-    if clip.layout not in ("crop", "fit"):
+    if clip.layout not in ("framed", "crop", "fit"):
         raise ValueError(f"unknown layout {clip.layout!r} for {clip.id}")
     fit = clip.layout == "fit"
+    framed = clip.layout == "framed"
     clips_dir = cfg.dir("clips")
     out = clips_dir / f"{clip.id}.mp4"
     ensure_free_space(clips_dir, cfg.machine.min_free_gb, 0.2)
@@ -104,8 +134,17 @@ def render_clip(
             n_frames = int(duration * r.fps) + 1
             centers = facetrack.smooth_path(track, cuts=cuts)
             cut_times = facetrack.scene_cuts(segment) if cuts else []
-            crop = facetrack.crop_path(centers, src_w, src_h, r.width, r.height, n_frames, r.fps,
-                                       cuts=cuts, cut_times=cut_times)  # fmt: skip
+            if framed:  # square at source resolution, eyes at ~38% where there is room
+                side = min(r.framed_video_px, src_w, src_h) // 2 * 2
+                y_fracs = facetrack.smooth_path(
+                    facetrack.square_y_fracs(subjects, src_h, side), cuts=cuts
+                )
+                crop = facetrack.crop_path(centers, src_w, src_h, 1, 1, n_frames, r.fps,
+                                           cuts=cuts, cut_times=cut_times, max_side=side,
+                                           y_fracs=y_fracs)  # fmt: skip
+            else:
+                crop = facetrack.crop_path(centers, src_w, src_h, r.width, r.height, n_frames,
+                                           r.fps, cuts=cuts, cut_times=cut_times)  # fmt: skip
             if cut_times:
                 log.info("%s: camera cuts at %s s", clip.id, [round(t, 2) for t in cut_times])
             script = facetrack.sendcmd_script(crop, r.fps)
@@ -125,14 +164,22 @@ def render_clip(
         cap_words = caption_words(
             words_between(words, clip.start_sec, clip.end_sec), campaign.caption_fixes
         )
-        ass = build_ass(cap_words, clip.hook_text, _caption_style(cfg, fit), metrics, face_y,
-                        bottoms, facetrack.SAMPLE_FPS, hook_metrics, duration)  # fmt: skip
+        frame = None
+        if framed:
+            fs = _framed_style(cfg)
+            layout = layout_framed(clip.hook_text, clip.context_line, metrics, hook_metrics, fs)
+            ass = build_framed_ass(cap_words, clip.accent_word, clip.context_line, layout, fs,
+                                   metrics, hook_metrics, duration)  # fmt: skip
+            frame = (layout.video_top, fs.video_px, fs.background)
+        else:
+            ass = build_ass(cap_words, clip.hook_text, _caption_style(cfg, fit), metrics, face_y,
+                            bottoms, facetrack.SAMPLE_FPS, hook_metrics, duration)  # fmt: skip
         (work / "captions.ass").write_text(ass)
 
         # 3. encode to a temp name, so a crash never leaves a half-written clip in place
         tmp = work / "out.mp4"
         cmd = render_cmd(segment, tmp, crop, r, cfg.machine.video_encoder, cmd_file,
-                         "captions.ass", fonts_arg)  # fmt: skip
+                         "captions.ass", fonts_arg, frame)  # fmt: skip
         run(cmd, cwd=work)
         # thumbnail: a frame of this clip, after the hook text is gone
         run(thumbnail_cmd(tmp, clips_dir / f"{clip.id}.jpg", min(duration / 3, r.hook_sec + 4)))

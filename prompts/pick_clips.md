@@ -37,14 +37,22 @@ Return ONLY valid JSON, no prose, no code fences:
     {
       "start": "mm:ss",
       "end": "mm:ss",
-      "hook_text": "6-10 words, concrete, sentence case: see Hook text",
+      "hook_text": "5-9 words, \"setup: punch\", concrete, sentence case: see Hook text",
+      "accent_word": "the key word or number of the punch, copied exactly from hook_text",
+      "context_line": "who and what, max 6 words, e.g. TJR · $10K live trading challenge",
       "title": "max 70 chars, curiosity-driven, no clickbait lies",
       "reason": "one sentence: why this will hold attention",
       "score": 0.0,
-      "story": false
+      "story": false,
+      "hashtags": ["#futurestrading"]
     }
   ]
 }
+
+`hashtags` is 0–2 topic hashtags that fit this clip's subject (e.g. `#futurestrading` for a trading clip,
+`#motivation` for a mindset clip): lowercase, no spaces, real and commonly used, no spammy or banned tags
+(#fyp, #viral, #followforfollow, #explore...), no tags promising money. Leave it empty if nothing fits;
+the campaign's own hashtags are added automatically.
 
 `start` is the timestamp of the clip's first transcript line. `end` is the timestamp of the first line AFTER the
 clip (the clip stops right before that line). Clips are cut on line boundaries, so pick whole lines.

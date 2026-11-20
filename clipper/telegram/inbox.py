@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
-from clipper import db, proc
+from clipper import db, post_text, proc
 from clipper.config import Campaign, Config
 from clipper.render.ffmpeg import encoder_args, probe_video
 from clipper.stages.pick import Clip, load_clips, save_clips
@@ -50,7 +50,7 @@ HELP = (
     "Clips arrive here when they are rendered.\n"
     "• <b>✅ Done</b> after posting: then reply with the post links.\n"
     "• <b>❌ Reject</b> deletes the clip.\n"
-    "• <b>🔁 Fit / Crop layout</b> re-renders it on the next run.\n"
+    "• <b>🔁 Framed / Crop / Fit</b> re-renders it in that layout on the next run.\n"
     "• Reply to a clip with its post links at any time.\n"
     "/pending: clips waiting  ·  /status: pipeline status and Claude cost"
 )
@@ -128,18 +128,22 @@ def submit_url(campaign: Campaign) -> str:
     return str(extra.get("submit_url") or extra.get("campaign_url") or "")
 
 
-def clip_caption(clip: Clip, campaign: Campaign, note: str = "") -> str:
-    """Video caption (HTML): title, campaign, score and length, the post caption in
-    <code> (one tap copies it), where to submit, and an optional status note."""
+def clip_caption(cfg: Config, clip: Clip, campaign: Campaign, note: str = "") -> str:
+    """Video caption (HTML): title, campaign, score and length; the post caption with its
+    footer and hashtags in one <code> block (one tap copies it all); the YouTube title in
+    another; where to submit; and an optional status note."""
     esc = html.escape
 
-    def build(title: str) -> str:
+    def build(head: str, title: str) -> str:
         lines = [
-            f"<b>{esc(title)}</b>",
+            f"<b>{esc(head)}</b>",
             f"{esc(campaign.name)} · score {clip.score:.2f} · {clip.end_sec - clip.start_sec:.0f} s",
             "",
-            "Caption (tap to copy):",
-            f"<code>{esc(clip.caption)}</code>",
+            "Caption + hashtags (tap to copy):",
+            f"<code>{esc(post_text.post_caption(cfg, campaign, title, clip.hashtags))}</code>",
+            "",
+            "YouTube title (tap to copy):",
+            f"<code>{esc(post_text.youtube_title(title))}</code>",
         ]
         url = submit_url(campaign)
         if url:
@@ -148,22 +152,59 @@ def clip_caption(clip: Clip, campaign: Campaign, note: str = "") -> str:
             lines += ["", note]
         return "\n".join(lines)
 
-    text = build(clip.title)
-    over = len(text) - CAPTION_LIMIT
-    if over > 0:
-        text = build(clip.title[: max(0, len(clip.title) - over - 1)] + "…")
+    def cut(title: str, over: int) -> str:
+        return title[: max(0, len(title) - over - 1)].rstrip() + "…"
+
+    text = build(clip.title, clip.title)
+    if len(text) > CAPTION_LIMIT:  # shorten the bold heading first, then the copied title
+        text = build(cut(clip.title, len(text) - CAPTION_LIMIT), clip.title)
+    title = clip.title
+    while len(text) > CAPTION_LIMIT and title:  # hashtags and the note always stay whole
+        title = cut(title, len(text) - CAPTION_LIMIT).removesuffix("…")
+        text = build("…", title + "…")
     return text[:CAPTION_LIMIT]
 
 
+def refresh_captions(ix: Inbox) -> tuple[int, int]:
+    """Edit the caption of every clip message still waiting (delivered), e.g. after the
+    caption format changed. Returns (edited, failed)."""
+    edited = failed = 0
+    for row in db.clips_in(ix.conn, "delivered"):
+        if not row["telegram_message_id"]:
+            continue
+        try:
+            clip, campaign = ix.clip(row["id"])
+            ix.api.call(
+                "editMessageCaption",
+                {"chat_id": ix.chat_id, "message_id": row["telegram_message_id"],
+                 "caption": clip_caption(ix.cfg, clip, campaign), "parse_mode": "HTML",
+                 "reply_markup": buttons(clip.id, clip.layout)},
+            )  # fmt: skip
+            edited += 1
+        except (TelegramError, KeyError) as exc:
+            if isinstance(exc, TelegramError) and "not modified" in str(exc):
+                continue
+            log.warning("could not refresh %s: %s", row["id"], exc)
+            failed += 1
+    return edited, failed
+
+
+LAYOUTS = ("framed", "crop", "fit")
+
+
 def buttons(clip_id: str, layout: str) -> dict[str, Any]:
-    other = "crop" if layout == "fit" else "fit"
+    """Done / Reject, and a re-render button for each other layout."""
+    others = [name for name in LAYOUTS if name != layout]
     return {
         "inline_keyboard": [
             [
                 {"text": "✅ Done", "callback_data": f"done:{clip_id}"},
                 {"text": "❌ Reject", "callback_data": f"reject:{clip_id}"},
             ],
-            [{"text": f"🔁 {other.title()} layout", "callback_data": f"{other}:{clip_id}"}],
+            [
+                {"text": f"🔁 {name.title()}", "callback_data": f"{name}:{clip_id}"}
+                for name in others
+            ],
         ]
     }
 
@@ -239,7 +280,7 @@ def send_clip(ix: Inbox, row: sqlite3.Row) -> int:
             "sendVideo",
             {
                 "chat_id": ix.chat_id,
-                "caption": clip_caption(clip, campaign),
+                "caption": clip_caption(ix.cfg, clip, campaign),
                 "parse_mode": "HTML",
                 "supports_streaming": True,
                 "width": width,
@@ -336,7 +377,7 @@ def on_button(ix: Inbox, data: str) -> str:
         return on_done(ix, row)
     if action == "reject":
         return on_reject(ix, row)
-    if action in ("fit", "crop"):
+    if action in LAYOUTS:
         return on_layout(ix, row, action)
     return "Unknown button"
 
@@ -354,7 +395,7 @@ def on_done(ix: Inbox, row: sqlite3.Row) -> str:
     ix.api.call(
         "editMessageCaption",
         {"chat_id": ix.chat_id, "message_id": row["telegram_message_id"],
-         "caption": clip_caption(clip, campaign, note), "parse_mode": "HTML",
+         "caption": clip_caption(ix.cfg, clip, campaign, note), "parse_mode": "HTML",
          "reply_markup": NO_BUTTONS},
     )  # fmt: skip
     if not db.posts_for(ix.conn, clip.id):
@@ -394,11 +435,11 @@ def on_layout(ix: Inbox, row: sqlite3.Row, layout: str) -> str:
     save_clips(clips, path)
     db.update_clip(ix.conn, clip.id, status="rerender", layout=layout)
     clip.layout = layout
+    note = f"🔁 Re-rendering with {layout} layout on the next run; this message will be replaced."
     ix.api.call(
         "editMessageCaption",
         {"chat_id": ix.chat_id, "message_id": row["telegram_message_id"],
-         "caption": clip_caption(clip, campaign, f"🔁 Re-rendering with {layout} layout on the "
-                                                 "next run; this message will be replaced."),
+         "caption": clip_caption(ix.cfg, clip, campaign, note),
          "parse_mode": "HTML", "reply_markup": NO_BUTTONS},
     )  # fmt: skip
     return f"Will re-render with {layout} layout"

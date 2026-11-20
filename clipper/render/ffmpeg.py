@@ -44,14 +44,26 @@ def video_filter(
     cmd_file: str | None,
     ass_file: str,
     fonts_dir: str | None = None,
+    framed: tuple[int, int, str] | None = None,
 ) -> str:
     """filter_complex graph from [0:v] to [v].
 
     crop layout (`crop` given): crop window, moved by sendcmd, scaled to the output size.
     fit layout (`crop` is None): the whole frame scaled to fit, centred over a blurred,
     slightly darkened copy of itself that fills the output.
+    framed layout (`framed` = (video_top, square_px, '#RRGGBB')): the square crop, scaled
+    to square_px, on a solid canvas at video_top.
     `fonts_dir`: fonts libass loads before falling back to system fonts."""
-    if crop is None:
+    if framed is not None and crop is not None:
+        top, side, color = framed
+        send = f"sendcmd=f={cmd_file}," if cmd_file else ""
+        x0 = crop.xs[0] if crop.xs else 0
+        chain = (
+            f"[0:v]fps={r.fps},{send}crop={crop.w}:{crop.h}:{x0}:{crop.y},"
+            f"scale={side}:{side}:flags=lanczos,"
+            f"pad={r.width}:{r.height}:0:{top}:color=0x{color.lstrip('#')}"
+        )
+    elif crop is None:
         bw, bh = r.width // 4, r.height // 4  # blur at quarter size: cheap, and softer
         chain = (
             f"[0:v]fps={r.fps},split[a][b];"
@@ -81,13 +93,14 @@ def render_cmd(
     cmd_file: str | None,
     ass_file: str,
     fonts_dir: str | None = None,
+    framed: tuple[int, int, str] | None = None,
 ) -> list[str]:
     """Lay out the video (see video_filter), burn captions, normalize loudness.
     `cmd_file`, `ass_file` and `fonts_dir` are names relative to ffmpeg's cwd (the work
     directory), which avoids filter-path escaping."""
     return [
         "ffmpeg", "-y", "-v", "error", "-i", str(src),
-        "-filter_complex", video_filter(r, crop, cmd_file, ass_file, fonts_dir),
+        "-filter_complex", video_filter(r, crop, cmd_file, ass_file, fonts_dir, framed),
         "-map", "[v]", "-map", "0:a:0",
         "-af", f"loudnorm=I={r.loudness_lufs:g}:TP=-1.5:LRA=11",
         *encoder_args(encoder, r.video_bitrate),

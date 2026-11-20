@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from pydantic import BaseModel, Field, ValidationError
@@ -16,6 +16,8 @@ from pydantic import BaseModel, Field, ValidationError
 from clipper import db
 from clipper.config import REPO_ROOT, Campaign, Config
 from clipper.llm.claude_cli import ClaudeCLIError, extract_json, run_claude
+from clipper.post_text import clean_topic_tags
+from clipper.render.captions import accent_spans
 from clipper.timing import Word, load_words, parse_ts, snap_clip, words_between
 
 log = logging.getLogger(__name__)
@@ -23,7 +25,8 @@ log = logging.getLogger(__name__)
 PROMPT_PATH = REPO_ROOT / "prompts" / "pick_clips.md"
 HOOK_RULES_PATH = REPO_ROOT / "prompts" / "hook_rules.md"
 REHOOK_PATH = REPO_ROOT / "prompts" / "regenerate_hook.md"
-HOOK_WORDS = (6, 10)
+HOOK_WORDS = (5, 9)
+CONTEXT_MAX_WORDS = 6
 
 
 def fill(template: str, values: dict[str, str]) -> str:
@@ -32,18 +35,25 @@ def fill(template: str, values: dict[str, str]) -> str:
     return template
 
 
-def hook_problems(hook: str) -> list[str]:
-    """Hook rules that can be checked mechanically (prompts/hook_rules.md)."""
+def hook_problems(hook: str, accent: str | None = None, context: str | None = None) -> list[str]:
+    """Headline rules that can be checked mechanically (prompts/hook_rules.md). `accent`
+    and `context` are checked when given (None = not part of this check)."""
     words = hook.split()
     problems = []
     lo, hi = HOOK_WORDS
     if not lo <= len(words) <= hi:
         problems.append(f"{len(words)} words instead of {lo}-{hi}")
+    if ":" not in hook:
+        problems.append('no "setup: punch" colon')
     shouting = [w for w in words if sum(c.isalpha() for c in w) >= 4 and w.upper() == w]
     if shouting:
         problems.append(f"ALL CAPS words: {', '.join(shouting)}")
     if any(c in hook for c in '!#"“”'):
         problems.append("no exclamation marks, hashtags or quotation marks")
+    if accent is not None and not accent_spans(words, accent):
+        problems.append("accent_word must be copied exactly from hook_text")
+    if context is not None and not 1 <= len(context.split()) <= CONTEXT_MAX_WORDS:
+        problems.append(f"context_line must be 1-{CONTEXT_MAX_WORDS} words")
     return problems
 
 
@@ -51,10 +61,13 @@ class PickedClip(BaseModel):
     start: str | float
     end: str | float
     hook_text: str = Field(min_length=1)
+    accent_word: str = ""  # the key word/number of hook_text, shown in the accent colour
+    context_line: str = ""  # who/what, max 6 words, under the headline
     title: str = Field(min_length=1)
     reason: str = ""
     score: float = 0.0
     story: bool = False  # a story may run up to pipeline.clip_story_max_sec
+    hashtags: list[str] = Field(default_factory=list)  # up to 2 topic tags, cleaned later
 
 
 class PickResponse(BaseModel):
@@ -72,8 +85,11 @@ class Clip:
     caption: str  # title + required campaign hashtags/text, ready to paste when posting
     reason: str
     score: float
-    layout: str = "crop"  # crop (face-tracked 9:16 crop) | fit (full frame on a blurred fill)
+    layout: str = "crop"  # framed (square on a canvas) | crop (9:16) | fit (blurred fill)
     story: bool = False  # Claude marked it a story: allowed up to clip_story_max_sec
+    accent_word: str = ""  # framed headline: the word/number shown in the accent colour
+    context_line: str = ""  # framed: who/what under the headline
+    hashtags: list[str] = field(default_factory=list)  # Claude's topic tags (max 2, cleaned)
 
 
 def load_clips(path: Path) -> list[Clip]:
@@ -119,25 +135,39 @@ def build_prompt(cfg: Config, campaign: Campaign, compact: str) -> str:
     return fill(PROMPT_PATH.read_text(), values)
 
 
-class HookReply(BaseModel):
+class Headline(BaseModel):
     hook_text: str = Field(min_length=1)
+    accent_word: str = ""
+    context_line: str = ""
+
+    def problems(self) -> list[str]:
+        return hook_problems(self.hook_text, self.accent_word, self.context_line)
 
 
-def _parse_hook(text: str) -> str:
-    hook = HookReply.model_validate(extract_json(text)).hook_text
-    return " ".join(hook.strip().strip("\"“”'").split()).rstrip(".")
+def _tidy(text: str) -> str:
+    return " ".join(text.strip().strip("\"“”'").split())
 
 
-def regenerate_hook(
+def _parse_headline(text: str) -> Headline:
+    h = Headline.model_validate(extract_json(text))
+    return Headline(
+        hook_text=_tidy(h.hook_text).rstrip("."),
+        accent_word=_tidy(h.accent_word),
+        context_line=_tidy(h.context_line).rstrip("."),
+    )
+
+
+def regenerate_headline(
     cfg: Config,
     conn: sqlite3.Connection,
     clip: Clip,
     campaign: Campaign,
     words: list[Word],
     video_title: str,
-) -> str:
-    """A new hook for an existing clip, written from what is said in it (one Claude call,
-    plus one retry if the reply breaks the hook rules). Raises ClaudeCLIError/ValueError."""
+) -> Headline:
+    """A new hook, accent word and context line for an existing clip, written from what is
+    said in it (one Claude call, plus one retry if the reply breaks the rules). Raises
+    ClaudeCLIError/ValueError."""
     said = " ".join(w.w for w in words_between(words, clip.start_sec, clip.end_sec))
     prompt = fill(
         REHOOK_PATH.read_text(),
@@ -152,22 +182,23 @@ def regenerate_hook(
     )
     reply = _ask(cfg, conn, clip.video_id, prompt)
     try:
-        hook = _parse_hook(reply)
+        head: Headline | None = _parse_headline(reply)
     except (ValueError, ValidationError):
-        hook = ""
-    if problems := (hook_problems(hook) if hook else ["no valid JSON"]):
-        log.warning("%s: hook %r breaks the rules (%s); asking once more",
-                    clip.id, hook, "; ".join(problems))  # fmt: skip
+        head = None
+    if problems := (head.problems() if head else ["no valid JSON"]):
+        log.warning("%s: headline %s breaks the rules (%s); asking once more",
+                    clip.id, head and head.model_dump(), "; ".join(problems))  # fmt: skip
         fix = (
-            f"Your hook {hook!r} breaks these rules: {'; '.join(problems)}.\n"
-            'Return ONLY the corrected JSON object {"hook_text": "..."}.\n\n' + prompt
+            f"Your reply {head and head.model_dump_json()} breaks these rules: "
+            f"{'; '.join(problems)}.\nReturn ONLY the corrected JSON object "
+            '{"hook_text": "...", "accent_word": "...", "context_line": "..."}.\n\n' + prompt
         )
-        retry = _parse_hook(_ask(cfg, conn, clip.video_id, fix))
-        if not hook or len(hook_problems(retry)) <= len(problems):
-            hook = retry
-        if left := hook_problems(hook):
-            log.warning("%s: using hook %r anyway (%s)", clip.id, hook, "; ".join(left))
-    return hook
+        retry = _parse_headline(_ask(cfg, conn, clip.video_id, fix))
+        if head is None or len(retry.problems()) <= len(problems):
+            head = retry
+        if left := head.problems():
+            log.warning("%s: using %s anyway (%s)", clip.id, head.model_dump(), "; ".join(left))
+    return head
 
 
 def parse_response(text: str) -> PickResponse:
@@ -221,6 +252,9 @@ def resolve_clips(
                 reason=p.reason.strip(),
                 score=p.score,
                 story=p.story,
+                accent_word=_tidy(p.accent_word),
+                context_line=_tidy(p.context_line),
+                hashtags=clean_topic_tags(p.hashtags),
             )
         )
     return clips

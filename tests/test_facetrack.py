@@ -11,6 +11,7 @@ from clipper.render.facetrack import (
     sendcmd_script,
     shot_cuts,
     smooth_path,
+    square_y_fracs,
     to_output_y,
     track_primary,
     tracked,
@@ -158,3 +159,29 @@ def test_sendcmd_only_on_change():
     script = sendcmd_script(Crop(606, 1076, 2, [10, 10, 20, 20, 30]), fps=30)
     assert script == "0.0667 crop x 20;\n0.1333 crop x 30;\n"
     assert sendcmd_script(Crop(606, 1076, 2, [10, 10]), fps=30).strip() == ""
+
+
+def test_square_crop_is_capped_at_source_resolution():
+    crop = crop_path([0.5], 1920, 1080, 1, 1, n_frames=2, fps=30, max_side=1080)
+    assert (crop.w, crop.h, crop.y, crop.ys) == (1080, 1080, 0, None)  # full height, no room
+    big = crop_path([0.5], 3840, 2160, 1, 1, n_frames=2, fps=30, max_side=1080,
+                    y_fracs=[0.25, 0.25])  # fmt: skip
+    assert (big.w, big.h) == (1080, 1080)  # 1080 source pixels, no downscale of a 4K frame
+    assert big.ys == [round(0.25 * (2160 - 1080))] * 2 and big.y == 270
+
+
+def test_square_y_puts_eyes_at_38_percent_but_never_cuts_the_head():
+    face = Face(0.5, 0.1, 0.9, top=0.40, bottom=0.55, eye_y=0.46)
+    assert square_y_fracs([face, None], src_h=1080, side=1080) == [0.0, 0.0]  # no room
+    (frac,) = square_y_fracs([face], src_h=2160, side=1080)
+    y = frac * (2160 - 1080)
+    assert y == pytest.approx(0.46 * 2160 - 0.38 * 1080)  # eyes at 38% of the square
+    high = Face(0.5, 0.1, 0.9, top=0.10, bottom=0.40, eye_y=0.30)
+    (frac,) = square_y_fracs([high], src_h=2160, side=1080)
+    assert frac * 1080 <= (0.10 - 0.35 * 0.30) * 2160 + 1e-6 or frac == 0.0  # head stays in
+    assert square_y_fracs([Face(0.5, 0.3, 0.9, kind="person")], 2160, 1080) == [None]
+
+
+def test_sendcmd_moves_x_and_y():
+    script = sendcmd_script(Crop(1080, 1080, 0, [10, 10, 20], ys=[5, 6, 6]), fps=30)
+    assert script == "0.0333 crop y 6;\n0.0667 crop x 20;\n"
